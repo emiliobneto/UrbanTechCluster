@@ -1,0 +1,77 @@
+coluna,descricao,unidade
+n_unidades,n unidades,média
+Numero_Viagens_total,Numero Viagens total,soma do período
+AreaConstruida_total,AreaConstruida total,soma do período
+AreaOcupada_total,AreaOcupada total,soma do período
+AreadaQuadra_total,AreadaQuadra total,soma do período
+Terreno_total,Terreno total,soma do período
+UsoTotal_total,UsoTotal total,soma do período
+EmpresaPequenoPorte_total,EmpresaPequenoPorte total,soma do período
+EmpresaMedioPorte_total,EmpresaMedioPorte total,soma do período
+EmpresaGrandePorte_total,EmpresaGrandePorte total,soma do período
+cont_aceleradora_total,cont aceleradora total,soma do período
+densidade_hec_media,densidade hec media,média
+concentracaoStartups_media,concentracaoStartups media,média
+ConcentracaoAreaVerde_media,ConcentracaoAreaVerde media,média
+ConcentracaoIES_media,ConcentracaoIES media,média
+ConcentracaoPatrimonioHistorico_media,ConcentracaoPatrimonioHistorico media,média
+ConcentracaoBOs_media,ConcentracaoBOs media,média
+TempoMediodeViagem_mediana,TempoMediodeViagem mediana,mediana
+ValorTerrenoM2_mediana,ValorTerrenoM2 mediana,mediana
+ValorConstrucaoM2_mediana,ValorConstrucaoM2 mediana,mediana
+NumerodePavimentos_mediana,NumerodePavimentos mediana,mediana
+ResidencialPopularHor_pct_medio,Uso do solo: ResidencialPopularHor_pct (média ponderada),share (0–1)
+ResidencialPopularVert_pct_medio,Uso do solo: ResidencialPopularVert_pct (média ponderada),share (0–1)
+ResidencialMedioPadraoHor_pct_medio,Uso do solo: ResidencialMedioPadraoHor_pct (média ponderada),share (0–1)
+ResidencialMedioPadraoVert_pct_medio,Uso do solo: ResidencialMedioPadraoVert_pct (média ponderada),share (0–1)
+ResidencialAltoPadraoHor_pct_medio,Uso do solo: ResidencialAltoPadraoHor_pct (média ponderada),share (0–1)
+ResidencialAltoPadraoVert_pct_medio,Uso do solo: ResidencialAltoPadraoVert_pct (média ponderada),share (0–1)
+ComercioServicos_pct_medio,Uso do solo: ComercioServicos_pct (média ponderada),share (0–1)
+OutrosUsos_pct_medio,Uso do solo: OutrosUsos_pct (média ponderada),share (0–1)
+Terreno_pct_medio,Uso do solo: Terreno_pct (média ponderada),share (0–1)
+DeslocamentoCaminhada_medio,Mobilidade (modo): DeslocamentoCaminhada (média ponderada),share (0–1)
+Caminhada_medio,Mobilidade (modo): Caminhada (média ponderada),share (0–1)
+DeslocamentoBicicleta_medio,Mobilidade (modo): DeslocamentoBicicleta (média ponderada),share (0–1)
+DeslocamentoTansporteColetivo_medio,Mobilidade (modo): DeslocamentoTansporteColetivo (média ponderada),share (0–1)
+DeslocamentoVeiculoIndividual_medio,Mobilidade (modo): DeslocamentoVeiculoIndividual (média ponderada),share (0–1)
+SemBaldeacao_medio,Mobilidade (baldeação): SemBaldeacao (média ponderada),share (0–1)
+1Baldeacao_medio,Mobilidade (baldeação): 1Baldeacao (média ponderada),share (0–1)
+Maisde2Baldeacoes_medio,Mobilidade (baldeação): Maisde2Baldeacoes (média ponderada),share (0–1)
+Ate2SalariosMinimos_medio,Renda: Ate2SalariosMinimos (média ponderada),share (0–1)
+2a5SalariosMinimos_medio,Renda: 2a5SalariosMinimos (média ponderada),share (0–1)
+5a10SalariosMinimos_medio,Renda: 5a10SalariosMinimos (média ponderada),share (0–1)
+Maisde10SalariosMinimos_medio,Renda: Maisde10SalariosMinimos (média ponderada),share (0–1)
+18a29anos_medio,Faixa etária: 18a29anos (média ponderada),share (0–1)
+30a39anos_medio,Faixa etária: 30a39anos (média ponderada),share (0–1)
+40a49anos_medio,Faixa etária: 40a49anos (média ponderada),share (0–1)
+50a64anos_medio,Faixa etária: 50a64anos (média ponderada),share (0–1)
+Maisde65anos_medio,Faixa etária: Maisde65anos (média ponderada),share (0–1)
+EnsinoMedioCompleto_medio,Escolaridade: EnsinoMedioCompleto (média ponderada),share (0–1)
+EnsinoSuperiorCompleto_medio,Escolaridade: EnsinoSuperiorCompleto (média ponderada),share (0–1)
+MestradoDoutoradoCompleto_medio,Escolaridade: MestradoDoutoradoCompleto (média ponderada),share (0–1)
+Masculino_medio,Sexo: Masculino (média ponderada),share (0–1)
+Feminino_medio,Sexo: Feminino (média ponderada),share (0–1)
+Brasileira_medio,Cidadania: Brasileira (média ponderada),share (0–1)
+Estrangeira_medio,Cidadania: Estrangeira (média ponderada),share (0–1)
+OrigemMotivoResidencia_medio,Origem (motivo): OrigemMotivoResidencia (média ponderada),share (0–1)
+OrigemMotivoOutros_medio,Origem (motivo): OrigemMotivoOutros (média ponderada),share (0–1)
+OrigemMotivoEducacao_medio,Origem (motivo): OrigemMotivoEducacao (média ponderada),share (0–1)
+OrigemMotivoTrabalhoComercioServico_medio,Origem (motivo): OrigemMotivoTrabalhoComercioServico (média ponderada),share (0–1)
+OrigemMotivotrabalhoindustria_medio,Origem (motivo): OrigemMotivotrabalhoindustria (média ponderada),share (0–1)
+DestinoMotivoResidencia_medio,Destino (motivo): DestinoMotivoResidencia (média ponderada),share (0–1)
+DestinoMotivoOutros_medio,Destino (motivo): DestinoMotivoOutros (média ponderada),share (0–1)
+DestinoMotivoEducacao_medio,Destino (motivo): DestinoMotivoEducacao (média ponderada),share (0–1)
+DestinoMotivoTrabalhoComercioServico_medio,Destino (motivo): DestinoMotivoTrabalhoComercioServico (média ponderada),share (0–1)
+DestinoMotivotrabalhoindustria_medio,Destino (motivo): DestinoMotivotrabalhoindustria (média ponderada),share (0–1)
+ResidencialPopularHor_medio,ResidencialPopularHor (média),nível
+ResidencialPopularVert_medio,ResidencialPopularVert (média),nível
+ResidencialMedioPadraoHor_medio,ResidencialMedioPadraoHor (média),nível
+ResidencialMedioPadraoVert_medio,ResidencialMedioPadraoVert (média),nível
+ResidencialAltoPadraoHor_medio,ResidencialAltoPadraoHor (média),nível
+ResidencialAltoPadraoVert_medio,ResidencialAltoPadraoVert (média),nível
+ComercioServicos_medio,ComercioServicos (média),nível
+OutrosUsos_medio,OutrosUsos (média),nível
+UsoPredominante_moda,UsoPredominante (moda),categoria
+CristalizacaoPredominante_moda,CristalizacaoPredominante (moda),categoria
+TO_moda,TO (moda),categoria
+CA_moda,CA (moda),categoria
