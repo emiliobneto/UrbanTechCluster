@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -21,16 +19,6 @@ import json
 
 from utils.colors import hex_to_rgb
 
-# -*- coding: utf-8 -*-
-import json
-import itertools
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-import pydeck as pdk
-import requests
-from scipy import stats
 
 # ==========================
 # CONFIGURAÇÃO GERAL
@@ -662,4 +650,5 @@ with tab4:
 
     st.subheader("Tabela PCA")
     st.dataframe(dfp, use_container_width=True)
+
 
