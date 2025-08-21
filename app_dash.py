@@ -127,8 +127,7 @@ def load_any(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
         return load_csv(owner_repo, path, branch)
     raise ValueError(f"Formato não suportado: {path}")
 
-from __future__ import annotations
-from typing import List, Tuple
+
 
 def hex_to_rgb(hex_color: str) -> Tuple[int,int,int, int]:
     h = hex_color.lstrip('#')
@@ -707,4 +706,5 @@ with c2:
 
 st.subheader("Tabela PCA")
 st.dataframe(dfp, use_container_width=True)
+
 
