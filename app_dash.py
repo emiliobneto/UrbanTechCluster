@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from utils.data import list_files, load_parquet, load_csv, load_gpkg
 from utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
-from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 import requests
@@ -706,3 +707,4 @@ with c2:
 
 st.subheader("Tabela PCA")
 st.dataframe(dfp, use_container_width=True)
+
