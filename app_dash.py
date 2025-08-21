@@ -66,19 +66,75 @@ def load_csv(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
     return pd.read_csv(url)
 
 @st.cache_data(show_spinner=True)
+def github_get_contents(owner_repo: str, path: str, branch: str) -> dict:
+    """Busca o metadata do arquivo na GitHub Contents API (funciona com LFS)."""
+    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
+    return r.json()
+
+@st.cache_data(show_spinner=True)
+def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
+    """Baixa o binário do arquivo respeitando LFS/privado e valida conteúdo."""
+    meta = github_get_contents(owner_repo, path, branch)
+    # quando listamos diretório, não guardamos o download_url; pegue-o aqui:
+    download_url = meta.get("download_url") or build_raw_url(owner_repo, path, branch)
+    r = requests.get(download_url, headers=_gh_headers(), timeout=180)
+    if r.status_code != 200:
+        ct = r.headers.get("Content-Type", "")
+        raise RuntimeError(f"Download falhou ({r.status_code}, Content-Type={ct}). Verifique token/privacidade.")
+    data = r.content
+
+    # 1) Ponteiro Git LFS?
+    if data.startswith(b"version https://git-lfs.github.com/spec"):
+        raise RuntimeError(
+            "Recebi um ponteiro Git LFS em vez do binário .gpkg. "
+            "Adicione um GitHub token em st.secrets['github']['token'] ou use o 'download_url' real."
+        )
+    # 2) HTML/JSON (rate limit, 404 etc)?
+    head = data[:200].strip().lower()
+    if head.startswith(b"<!doctype html") or head.startswith(b"<html") or head.startswith(b"{"):
+        ct = r.headers.get("Content-Type", "")
+        raise RuntimeError(
+            f"Recebi HTML/JSON em vez do .gpkg (Content-Type={ct}). "
+            "Provável rate limit/privado. Defina st.secrets['github']['token']."
+        )
+    return data
+
+@st.cache_data(show_spinner=True)
 def load_gpkg(owner_repo: str, path: str, branch: str, layer: str = None):
-    # Leitura via GeoPandas (pyogrio/GDAL)
+    """Baixa um .gpkg do GitHub de forma robusta e lê com o engine pyogrio."""
     try:
         import geopandas as gpd  # type: ignore
     except Exception as e:
         raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
-    url = build_raw_url(owner_repo, path, branch)
-    content = requests.get(url, headers=_gh_headers(), timeout=120).content
-    import tempfile
+
+    blob = github_fetch_bytes(owner_repo, path, branch)
+    import tempfile, os
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
-        tmp.write(content)
+        tmp.write(blob)
         tmp.flush()
-        return gpd.read_file(tmp.name, layer=layer)  # type: ignore
+        tmp_path = tmp.name
+
+    try:
+        # Force o engine pyogrio (muito mais robusto no Streamlit Cloud)
+        return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")  # type: ignore
+    except Exception as e:
+        # fallback: tente sem engine (Fiona), caso pyogrio não esteja disponível no runtime
+        try:
+            return gpd.read_file(tmp_path, layer=layer)  # type: ignore
+        except Exception as e2:
+            raise RuntimeError(
+                f"Falha lendo {path} como GPKG. "
+                f"Tente instalar/atualizar `geopandas>=1.0` e `pyogrio>=0.9`, "
+                f"ou verifique se o arquivo não é um ponteiro LFS."
+            ) from e2
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
     items = github_listdir(owner_repo, path, branch)
@@ -639,6 +695,7 @@ with tab4:
 
     st.subheader("Tabela PCA")
     st.dataframe(dfp, use_container_width=True)
+
 
 
 
