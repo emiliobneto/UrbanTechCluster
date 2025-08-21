@@ -2,22 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from utils.data import list_files, load_parquet, load_csv, load_gpkg
-from utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Any
 import requests
 import itertools
 from scipy import stats
-from utils.maps import make_geojson, attach_fill_color, render_geojson_layer, render_line_layer, render_point_layer, deck, osm_basemap_deck
-from utils.classify import jenks_breaks, is_categorical
-from utils.colors import pick_sequential, pick_categorical
-from utils.data import list_files, load_parquet, load_csv, load_gpkg
-import mapclassify as mc
 import pydeck as pdk
 import json
-
-from utils.colors import hex_to_rgb
 
 
 # ==========================
@@ -650,5 +639,6 @@ with tab4:
 
     st.subheader("Tabela PCA")
     st.dataframe(dfp, use_container_width=True)
+
 
 
