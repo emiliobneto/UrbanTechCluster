@@ -445,7 +445,207 @@ if render_pca_tab is None:
             "e recarregue o app."
         )
 
+import ast
 
+def _find_pca_base_dir(repo, branch, pick_existing_dir):
+    # tenta variações mais comuns do caminho
+    return pick_existing_dir(
+        repo, branch,
+        ["Data/analises/PCA", "Data/Analises/PCA", "data/analises/PCA", "data/Analises/PCA"]
+    )
+
+def _safe_literal_list(x):
+    """
+    Converte strings tipo "[0.41, 0.22, ...]" em lista de floats.
+    Se já for lista, retorna como está. Se falhar, retorna [].
+    """
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return list(x)
+    if pd.isna(x):
+        return []
+    s = str(x).strip()
+    try:
+        val = ast.literal_eval(s)
+        if isinstance(val, (list, tuple, np.ndarray)):
+            return list(val)
+    except Exception:
+        pass
+    # tentativa: dividir por vírgula
+    try:
+        s2 = s.strip("[]()")
+        parts = [p.strip() for p in s2.split(",")]
+        vals = []
+        for p in parts:
+            if p:
+                vals.append(float(p))
+        return vals
+    except Exception:
+        return []
+
+def _classify_pca_file(df: pd.DataFrame):
+    """
+    Classifica rapidamente um arquivo de PCA em:
+      - 'evr'         → contém variância explicada (colunas variancia_explicada/var_exp etc.)
+      - 'pipeline'    → tabela de pipeline (linhas 'pca','imputer','cols','k' e colunas por grupo)
+      - 'generic'     → mostrar preview
+    """
+    cols_l = [c.lower() for c in df.columns]
+    # sinais de EVR
+    if any(("variancia" in c and ("explic" in c or "acumul" in c)) or ("var_exp" in c) for c in cols_l):
+        return "evr"
+    # sinais de pipeline (essas tabelas costumam ter a 1ª coluna com rótulos: pca, imputer, scaler, cols, k)
+    first_col = df.columns[0] if len(df.columns) else None
+    if first_col and df[first_col].astype(str).str.lower().head(5).isin(
+        ["pca", "imputer", "scaler", "cols", "k"]
+    ).any():
+        return "pipeline"
+    # também pode vir como colunas com nomes dos grupos e linhas com 'pca','imputer', etc.
+    if any("pca(" in str(x).lower() for x in df.head(5).to_numpy().reshape(-1)):
+        return "pipeline"
+    return "generic"
+
+def _render_variancia_file(df: pd.DataFrame):
+    """
+    Renderiza variância explicada e acumulada.
+    Lê colunas prováveis: grupo | variancia_explicada | variancia_acumulada | var_exp | var_exp_acumulada
+    Gera scree-bar e linha acumulada. Sem recálculo.
+    """
+    cols = {c.lower(): c for c in df.columns}
+    # tenta identificar nomes
+    col_group = cols.get("grupo") or cols.get("grupos") or None
+
+    col_evr = (
+        cols.get("variancia_explicada")
+        or cols.get("var_exp")
+        or next((c for c in df.columns if "variancia" in c.lower() and "explic" in c.lower()), None)
+        or next((c for c in df.columns if "var_exp" in c.lower() and "acumul" not in c.lower()), None)
+    )
+    col_evr_cum = (
+        cols.get("variancia_acumulada")
+        or cols.get("var_exp_acumulada")
+        or next((c for c in df.columns if "variancia" in c.lower() and "acumul" in c.lower()), None)
+        or next((c for c in df.columns if "var_exp" in c.lower() and "acumul" in c.lower()), None)
+    )
+
+    if not col_evr:
+        st.warning("Não identifiquei a coluna de variância explicada neste arquivo.")
+        st.dataframe(df.head(), use_container_width=True)
+        return
+
+    df_use = df.copy()
+
+    # se houver agrupamento por 'grupo', permita selecionar
+    if col_group and col_group in df_use.columns:
+        grupos = df_use[col_group].dropna().astype(str).unique().tolist()
+        if grupos:
+            g_sel = st.selectbox("Grupo (quando aplicável)", grupos, index=0)
+            df_use = df_use[df_use[col_group].astype(str) == g_sel]
+
+    # normalmente cada linha tem uma lista como string; se houver várias linhas, pegue a primeira
+    if len(df_use) > 1 and (col_evr in df_use.columns):
+        df_use = df_use.head(1)
+
+    evr_list = _safe_literal_list(df_use.iloc[0][col_evr])
+    if col_evr_cum and col_evr_cum in df_use.columns:
+        evr_cum_list = _safe_literal_list(df_use.iloc[0][col_evr_cum])
+    else:
+        # se acumulada não existir, compute acumulada a partir da lista (apenas para visualização)
+        total = 0.0
+        evr_cum_list = []
+        for v in evr_list:
+            total += float(v)
+            evr_cum_list.append(total)
+
+    df_plot = pd.DataFrame({
+        "component": [f"PC{i+1}" for i in range(len(evr_list))],
+        "explained_variance_ratio": evr_list,
+        "cumulative": evr_cum_list
+    })
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(df_plot, x="component", y="explained_variance_ratio",
+                     title="Scree — Variância explicada por componente")
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig2 = px.line(df_plot, x="component", y="cumulative", markers=True,
+                       title="Variância explicada acumulada")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("Tabela — Variância")
+    st.dataframe(df_plot, use_container_width=True)
+
+def _render_pipeline_file(df: pd.DataFrame):
+    """
+    Renderiza a tabela de pipeline (PCA, imputer, cols, k, etc.) como quadro legível.
+    Esses arquivos que você enviou (p.ex.: PCA_*.csv) têm:
+      linhas: pca | imputer | scaler | cols | k
+      colunas: nomes dos grupos (Startups, UsoeOcupacao, ...)
+    """
+    # se a primeira coluna for rotuladora de linhas, transforme em índice
+    first_col = df.columns[0]
+    if df[first_col].astype(str).str.lower().head(5).isin(["pca","imputer","scaler","cols","k"]).any():
+        df2 = df.set_index(first_col)
+    else:
+        df2 = df.copy()
+
+    st.subheader("Tabela — Pipeline PCA por grupo")
+    st.dataframe(df2, use_container_width=True)
+
+    # destaque simples para o 'k' (n_components)
+    possible_k_index = next((idx for idx in df2.index.astype(str).str.lower() if idx.strip()=="k"), None)
+    if possible_k_index and "k" in df2.index.str.lower().tolist():
+        try:
+            k_row = df2.loc[[c for c in df2.index if str(c).lower()=="k"][0]]
+            st.caption("Componentes (k) por grupo:")
+            st.write(k_row.to_frame("k").T)
+        except Exception:
+            pass
+
+def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
+    st.subheader("Arquivos de PCA (sem recálculo)")
+    base_dir = _find_pca_base_dir(repo, branch, pick_existing_dir)
+    st.caption(f"Diretório PCA: `{base_dir}`")
+
+    files_all = list_files(repo, base_dir, branch, (".csv", ".parquet"))
+    if not files_all:
+        st.info("Nenhum arquivo encontrado em `Data/analises/PCA` (ou variações).")
+        return
+
+    # Separa por padrão de nome (apenas para ajudar o usuário a escolher rapidamente)
+    nomes = [f["name"] for f in files_all]
+    evr_default = [n for n in nomes if "variancia" in n.lower() or "var_exp" in n.lower()]
+    pipe_default = [n for n in nomes if n.lower().startswith("pca")]
+
+    st.markdown("### 1) Variância explicada")
+    if evr_default:
+        evr_sel = st.selectbox("Selecione arquivo de variância explicada", evr_default, index=0)
+    else:
+        evr_sel = st.selectbox("Selecione arquivo de variância explicada", nomes, index=0)
+    evr_obj = next(x for x in files_all if x["name"] == evr_sel)
+    df_evr = load_parquet(repo, evr_obj["path"], branch) if evr_obj["name"].endswith(".parquet") else load_csv(repo, evr_obj["path"], branch)
+
+    kind_evr = _classify_pca_file(df_evr)
+    if kind_evr == "evr":
+        _render_variancia_file(df_evr)
+    else:
+        st.warning("Este arquivo não parece conter variância explicada. Exibindo preview:")
+        st.dataframe(df_evr.head(), use_container_width=True)
+
+    st.divider()
+
+    st.markdown("### 2) Pipeline / Modelo (opcional)")
+    pipe_choices = pipe_default or nomes
+    pipe_sel = st.selectbox("Selecione arquivo de pipeline/modelo", pipe_choices, index=0)
+    pipe_obj = next(x for x in files_all if x["name"] == pipe_sel)
+    df_pipe = load_parquet(repo, pipe_obj["path"], branch) if pipe_obj["name"].endswith(".parquet") else load_csv(repo, pipe_obj["path"], branch)
+
+    kind_pipe = _classify_pca_file(df_pipe)
+    if kind_pipe == "pipeline":
+        _render_pipeline_file(df_pipe)
+    else:
+        st.info("Arquivo não reconhecido como pipeline. Exibindo preview:")
+        st.dataframe(df_pipe.head(), use_container_width=True)
 # ==========================
 # TABS
 # ==========================
@@ -808,14 +1008,13 @@ with tab3:
 # ABA 4 — PCA (em arquivo separado)
 # -----------------------------------------------------------------------------
 with tab4:
-    render_pca_tab(
+    render_pca_tab_inline(
         repo=repo,
         branch=branch,
         pick_existing_dir=pick_existing_dir,
         list_files=list_files,
         load_parquet=load_parquet,
-        load_csv=load_csv,
-        github_tree_paths=github_tree_paths
+        load_csv=load_csv
     )
     
     def _find_pca_base_dir(repo, branch, pick_existing_dir):
@@ -1005,6 +1204,7 @@ with tab4:
             _render_scores_section(df_scores, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv)
         else:
             st.info("Nenhum arquivo de *scores* identificado.")
+
 
 
 
