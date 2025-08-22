@@ -640,7 +640,7 @@ def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_
     # filtro opcional por ano
     if ano_col:
         anos = sorted([int(x) for x in df_scores[ano_col].dropna().unique()])
-        ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1], key="pca_scores_ano")
+        ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1])
         df_scores = df_scores[df_scores[ano_col]==ano_sel]
 
     pc_x = st.selectbox("PC eixo X", pc_cols, index=0)
@@ -870,68 +870,119 @@ with tab1:
 # -----------------------------------------------------------------------------
 # ABA 2 — Clusterização (somente leitura/visualização)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ABA 2 — Clusterização (somente leitura/visualização) — PATCH
+# Substitua todo o bloco original "with tab2:" por este.
+# Mudanças principais:
+# - Diretórios resolvidos com pick_existing_dir (tolerante a caixa/leves variações)
+# - Detecção de coluna 'SQ' case-insensitive em ambos os dataframes
+# - Escolha de coluna de cluster mais robusta (tolerante a nomes alternativos)
+# - Recortes/analises usam pick_existing_dir
+# - Spearman sem caminho fixo: busca automática por arquivos que contenham "spearman" e "pairs"
+# -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa de Clusters + Métricas + Spearman (somente leitura)")
 
     # -----------------------------
-    # 2.1) Carregar CLUSTERS (fixo no diretório de Originais)
+    # 2.1) Carregar CLUSTERS (tolerante a variações de diretório/arquivo)
     # -----------------------------
-    clusters_dir = "Data/dados/Originais"
+    clusters_dir = pick_existing_dir(
+        repo,
+        branch,
+        [
+            "Data/dados/Originais",
+            "Data/dados/originais",
+            "data/dados/originais",
+        ],
+    )
+
     all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
-    cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
-    
+
+    # 1ª tentativa: nome exato EstagioClusterizacao (case-insensitive)
+    cand = [
+        f
+        for f in all_in_dir
+        if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])
+    ]
+    # 2ª tentativa: qualquer arquivo que tenha 'estagio' e 'cluster' no nome
+    if not cand:
+        cand = [
+            f
+            for f in all_in_dir
+            if re.search(r"(?i)estagio", f["name"]) and re.search(r"(?i)cluster", f["name"])
+        ]
+
     if not cand:
         st.error(
-            f"Não encontrei `EstagioClusterizacao.csv` ou `EstagioClusterizacao.parquet` em `{clusters_dir}`.\n"
-            f"Coloque o arquivo com esse nome exato (case-insensitive)."
+            "Não encontrei arquivo de clusterização. Coloque `EstagioClusterizacao.csv`/`.parquet` ou um arquivo cujo nome contenha 'estagio' e 'cluster' em `" + clusters_dir + "`."
         )
         st.stop()
-    
-    est_file = cand[0]  # único esperado
-    df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
-    
+
+    est_file = cand[0]
+    df_est = (
+        load_parquet(repo, est_file["path"], branch)
+        if est_file["name"].lower().endswith(".parquet")
+        else load_csv(repo, est_file["path"], branch)
+    )
+
     # filtro por Ano (se existir) — com key exclusivo
-    years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
-    year_sel = st.select_slider("Ano", options=years, value=years[-1], key="clu_ano") if years else None
+    years = (
+        sorted([int(y) for y in df_est["Ano"].dropna().unique()])
+        if "Ano" in df_est.columns
+        else []
+    )
+    year_sel = (
+        st.select_slider("Ano", options=years, value=years[-1], key="clu_ano")
+        if years
+        else None
+    )
     if year_sel is not None:
         df_est = df_est[df_est["Ano"] == year_sel]
-    
-    # coluna de cluster (prioriza EstagioClusterizacao)
-    cluster_cols = [c for c in df_est.columns if ("cluster" in c.lower()) or ("estagio" in c.lower()) or (c.lower() == "label")]
+
+    # coluna de cluster (mais robusta)
+    cluster_cols = [c for c in df_est.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
     if not cluster_cols:
-        st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao).")
+        st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
         st.stop()
-    default_idx = cluster_cols.index("EstagioClusterizacao") if "EstagioClusterizacao" in cluster_cols else 0
-    cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=default_idx, key="clu_cluster_col")
+    # Preferir exatamente 'EstagioClusterizacao' (insensível a caixa), senão 1ª opção
+    preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
+    cluster_col = st.selectbox(
+        "Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col"
+    )
 
     # -----------------------------
     # 2.2) Mapa de quadras colorido por cluster
     # -----------------------------
-    # Usa o mesmo GPKG de quadras, mas agora só colore com os clusters da aba 2
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
             gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
             st.session_state["gdf_quadras_cached"] = gdf_quadras
         except Exception as e:
-            st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
+            st.error(
+                f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}"
+            )
             st.stop()
 
-    join_est = "SQ" if "SQ" in df_est.columns else None
-    join_quad = "SQ" if "SQ" in gdf_quadras.columns else None
+    # detectar coluna SQ em ambos, de forma case-insensitive
+    join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
+    join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not (join_est and join_quad):
-        st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ'.")
+        st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ' (qualquer caixa).")
         st.stop()
 
-    gdfc = gdf_quadras.merge(df_est[[join_est, cluster_col]], left_on=join_quad, right_on=join_est, how="left")
+    gdfc = gdf_quadras.merge(
+        df_est[[join_est, cluster_col]], left_on=join_quad, right_on=join_est, how="left"
+    )
 
-    # paleta categórica + legenda
-    cats = [c for c in gdfc[cluster_col].dropna().unique()]
-    palette = pick_categorical(len(cats))
+    # paleta categórica + legenda (tolerar rótulos não numéricos)
+    cats = gdfc[cluster_col].dropna().unique().tolist()
     try:
         cats_sorted = sorted(cats, key=lambda x: float(x))
     except Exception:
         cats_sorted = sorted(cats, key=lambda x: str(x))
+
+    palette = pick_categorical(len(cats_sorted))
     cmap = {cat: palette[i] for i, cat in enumerate(cats_sorted)}
 
     gdfc["value"] = gdfc[cluster_col]
@@ -944,7 +995,13 @@ with tab2:
     colM, colL = st.columns([4, 1], gap="large")
     with colM:
         st.markdown("#### Mapa — Clusters por SQ")
-        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+        base_map = st.radio(
+            "Plano de fundo",
+            ["OpenStreetMap", "Satélite (Mapbox)"],
+            index=0,
+            horizontal=True,
+            key="clu_base",
+        )
         if base_map.startswith("Satélite"):
             deck([render_geojson_layer(gj, name="clusters")], satellite=True)
         else:
@@ -958,11 +1015,15 @@ with tab2:
     # 2.3) Mapa de recortes (mesmo diretório da app)
     # -----------------------------
     st.markdown("#### Mapa — Recortes (opcional)")
-    rec_dir = "Data/mapa/recortes"
+    rec_dir = pick_existing_dir(
+        repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"]
+    )
     try:
         rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
         if rec_files:
-            rec_sel = st.selectbox("Arquivo de recorte", [f["name"] for f in rec_files], index=0, key="clu_rec_file")
+            rec_sel = st.selectbox(
+                "Arquivo de recorte", [f["name"] for f in rec_files], index=0, key="clu_rec_file"
+            )
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
             layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
@@ -976,7 +1037,7 @@ with tab2:
                 st.markdown("**Legenda — Recorte**")
                 _legend_row("#444444", "Contorno do recorte")
         else:
-            st.caption("Pasta `Data/mapa/recortes` vazia.")
+            st.caption(f"Pasta `{rec_dir}` vazia.")
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
 
@@ -986,75 +1047,125 @@ with tab2:
     # 2.4) Métricas por cluster/ano (arquivos prontos)
     # -----------------------------
     st.subheader("Métricas por cluster/ano")
-    versao = st.radio("Versão de análise", ["originais", "winsorizados"], index=0, horizontal=True, key="clu_ver")
-    base_metrics = "Data/analises/original" if versao == "originais" else "Data/analises/winsorizados"
+    versao = st.radio(
+        "Versão de análise", ["originais", "winsorizados"], index=0, horizontal=True, key="clu_ver"
+    )
 
-    # prioriza metricas.parquet, depois metricas.csv
-    met_files = [f for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
-                 if f["name"].lower() in ("metricas.parquet", "metricas.csv")]
+    base_metrics = (
+        pick_existing_dir(repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"])  # noqa: E501
+        if versao == "originais"
+        else pick_existing_dir(
+            repo,
+            branch,
+            ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"],
+        )
+    )
+
+    met_files = [
+        f
+        for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
+        if f["name"].lower() in ("metricas.parquet", "metricas.csv")
+    ]
     if not met_files:
-        met_files = [f for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
-                     if "metrica" in f["name"].lower() or "metrics" in f["name"].lower()]
+        met_files = [
+            f
+            for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
+            if re.search(r"(?i)metrica|metrics", f["name"]) is not None
+        ]
+
     if met_files:
-        met_files = sorted(met_files, key=lambda f: 0 if f["name"].lower().endswith(".parquet") else 1)
-        sel_met = st.selectbox("Arquivo de métricas", [f["name"] for f in met_files], index=0, key="clu_metrics_file")
+        met_files = sorted(
+            met_files, key=lambda f: 0 if f["name"].lower().endswith(".parquet") else 1
+        )
+        sel_met = st.selectbox(
+            "Arquivo de métricas", [f["name"] for f in met_files], index=0, key="clu_metrics_file"
+        )
         met_obj = next(x for x in met_files if x["name"] == sel_met)
-        dfm = load_parquet(repo, met_obj["path"], branch) if met_obj["name"].endswith(".parquet") else load_csv(repo, met_obj["path"], branch)
+        dfm = (
+            load_parquet(repo, met_obj["path"], branch)
+            if met_obj["name"].endswith(".parquet")
+            else load_csv(repo, met_obj["path"], branch)
+        )
 
         if "Ano" in dfm.columns:
             years_m = sorted([int(y) for y in dfm["Ano"].dropna().unique()])
             if years_m:
-                year_m = st.select_slider("Ano (tabela)", options=years_m, value=years_m[-1], key="clu_met_ano")
+                year_m = st.select_slider(
+                    "Ano (tabela)", options=years_m, value=years_m[-1], key="clu_met_ano"
+                )
                 dfm = dfm[dfm["Ano"] == year_m]
 
-        cl_cols = [c for c in dfm.columns if ("cluster" in c.lower()) or ("estagio" in c.lower()) or (c.lower() == "label")]
+        cl_cols = [c for c in dfm.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
         if cl_cols:
-            cl_sel = st.multiselect("Filtrar clusters", sorted(dfm[cl_cols[0]].dropna().unique().tolist()),
-                                    default=None, key="clu_met_clusters")
+            valores = sorted(dfm[cl_cols[0]].dropna().unique().tolist(), key=lambda x: str(x))
+            cl_sel = st.multiselect(
+                "Filtrar clusters", valores, default=None, key="clu_met_clusters"
+            )
             if cl_sel:
                 dfm = dfm[dfm[cl_cols[0]].isin(cl_sel)]
 
         st.dataframe(dfm, use_container_width=True)
     else:
-        st.info(f"Não encontrei `metricas.csv`/`metricas.parquet` em `{base_metrics}`.")
+        st.info(f"Não encontrei 'metricas.csv'/'metricas.parquet' em `{base_metrics}`.")
 
     st.divider()
 
     # -----------------------------
-    # 2.5) Spearman (pares) — tabela + heatmap (arquivo pronto e caminho fixo)
+    # 2.5) Spearman (pares) — tabela + heatmap (busca automática)
     # -----------------------------
     st.subheader("Spearman (pares) — tabela e heatmap")
 
-    spearman_fixed = "Data/analises/original/analise_clusters__spearman_pairs__20250820-180622.csv"
+    base_sp = pick_existing_dir(
+        repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"]
+    )
     df_sp = None
-    try:
-        df_sp = load_csv(repo, spearman_fixed, branch)
-        spearman_title = os.path.basename(spearman_fixed)
-    except Exception:
-        # fallback: buscar por padrão dentro de original
-        base_sp = "Data/analises/original"
-        sp_candidates = [f for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
-                         if ("spearman" in f["name"].lower() and "pairs" in f["name"].lower())]
-        if sp_candidates:
-            sp_sel = st.selectbox("Selecione arquivo Spearman (pares)", [f["name"] for f in sp_candidates],
-                                  index=0, key="clu_spearman_sel")
-            sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
-            df_sp = load_parquet(repo, sp_obj["path"], branch) if sp_obj["name"].endswith(".parquet") else load_csv(repo, sp_obj["path"], branch)
-            spearman_title = sp_obj["name"]
+
+    # procurar primeiro em 'original'
+    sp_candidates = [
+        f
+        for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
+        if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
+    ]
+    # se não houver, procurar em winsorizados
+    if not sp_candidates:
+        base_sp_alt = pick_existing_dir(
+            repo,
+            branch,
+            ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"],
+        )
+        sp_candidates = [
+            f
+            for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet"))
+            if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
+        ]
+
+    if sp_candidates:
+        sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])  # ordena pelo nome
+        sp_sel = st.selectbox(
+            "Selecione arquivo Spearman (pares)", [f["name"] for f in sp_candidates], index=0, key="clu_spearman_sel"
+        )
+        sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
+        df_sp = (
+            load_parquet(repo, sp_obj["path"], branch)
+            if sp_obj["name"].endswith(".parquet")
+            else load_csv(repo, sp_obj["path"], branch)
+        )
+        spearman_title = sp_obj["name"]
 
     if df_sp is not None:
         st.markdown(f"**Tabela — {spearman_title}**")
         st.dataframe(df_sp, use_container_width=True)
 
-        # montar heatmap a partir de (var_i, var_j, rho) se possível
         import re as _re
         cand_i = next((c for c in df_sp.columns if _re.search(r"(var|col).*a$", c.lower())), None)
         cand_j = next((c for c in df_sp.columns if _re.search(r"(var|col).*b$", c.lower())), None)
-        cand_r = next((c for c in df_sp.columns if any(k in c.lower() for k in ["rho", "spearman", "corr", "coef"])), None)
-
+        cand_r = next(
+            (c for c in df_sp.columns if any(k in c.lower() for k in ["rho", "spearman", "corr", "coef"])),
+            None,
+        )
         if not (cand_i and cand_j and cand_r):
             text_cols = [c for c in df_sp.columns if not pd.api.types.is_numeric_dtype(df_sp[c])]
-            num_cols  = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
+            num_cols = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
             if len(text_cols) >= 2 and num_cols:
                 cand_i, cand_j, cand_r = text_cols[0], text_cols[1], num_cols[0]
 
@@ -1064,15 +1175,18 @@ with tab2:
                 M = M.combine_first(M.T)
                 M = np.maximum(M, M.T)
                 return M
+
             M = _pairs_to_matrix(df_sp, cand_i, cand_j, cand_r)
             if M is not None and not M.empty:
-                fig = px.imshow(M, text_auto=False, color_continuous_scale="Inferno",
-                                title="Heatmap — Spearman (pares → matriz)")
+                fig = px.imshow(
+                    M, text_auto=False, color_continuous_scale="Inferno", title="Heatmap — Spearman (pares → matriz)"
+                )
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.caption("Não consegui identificar as colunas para montar o heatmap automaticamente.")
     else:
-        st.info("Arquivo de Spearman (pares) não encontrado.")
+        st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
+
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas (somente leitura/exibição)
@@ -1143,6 +1257,7 @@ with tab4:
     )
     
     
+
 
 
 
