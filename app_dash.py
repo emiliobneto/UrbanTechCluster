@@ -1325,10 +1325,10 @@ with tab2:
         except Exception:
             return str(v)
         labels = {
-            0: "0 – Ausência de clusterização",
-            1: "1 – Cluster em estágio inicial",
-            2: "2 – Cluster em formação",
-            3: "3 – Clusterizado",
+            0.0: "0 – Ausência de clusterização",
+            1.0: "1 – Cluster em estágio inicial",
+            2.0: "2 – Cluster em formação",
+            3.0: "3 – Clusterizado",
         }
         return labels.get(n, str(v))
 
@@ -1713,6 +1713,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
