@@ -1,3 +1,10 @@
+import os, sys
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))              # .../urbantechcluster (ou onde o app estiver)
+_REPO_ROOT = os.path.dirname(_THIS_DIR)                              # raiz do repositório
+for _p in (_THIS_DIR, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import json
 import itertools
 import numpy as np
@@ -6,10 +13,6 @@ import plotly.express as px
 import pydeck as pdk
 import streamlit as st
 from scipy import stats
-import io
-import requests
-import streamlit as st
-import pandas as pd
 
 # ===== App config
 st.set_page_config(page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
@@ -17,18 +20,34 @@ st.set_page_config(page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP"
 TITLE = "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
 st.title(TITLE)
 
-# ===== Utils (módulos locais)
-from utils.github_io import (
-    normalize_repo, resolve_branch, list_files, github_tree_paths,
-    load_csv, load_parquet, load_gpkg, pick_existing_dir
-)
-from utils.colors import pick_categorical, pick_sequential, hex_to_rgba
-from utils.classify import is_categorical, jenks_breaks
-from utils.maps import (
-    make_geojson, render_geojson_layer, render_line_layer,
-    render_point_layer, deck, osm_basemap_deck
-)
-from utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
+# ===== Imports resilientes dos módulos locais
+try:
+    # quando 'utils' está na mesma pasta do app OU na raiz do repo
+    from utils.github_io import (
+        normalize_repo, resolve_branch, list_files, github_tree_paths,
+        load_csv, load_parquet, load_gpkg, pick_existing_dir
+    )
+    from utils.colors import pick_categorical, pick_sequential, hex_to_rgba
+    from utils.classify import is_categorical, jenks_breaks
+    from utils.maps import (
+        make_geojson, render_geojson_layer, render_line_layer,
+        render_point_layer, deck, osm_basemap_deck
+    )
+    from utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
+except ModuleNotFoundError:
+    # quando o projeto é um pacote 'urbantechcluster' e utils está dentro dele
+    from urbantechcluster.utils.github_io import (
+        normalize_repo, resolve_branch, list_files, github_tree_paths,
+        load_csv, load_parquet, load_gpkg, pick_existing_dir
+    )
+    from urbantechcluster.utils.colors import pick_categorical, pick_sequential, hex_to_rgba
+    from urbantechcluster.utils.classify import is_categorical, jenks_breaks
+    from urbantechcluster.utils.maps import (
+        make_geojson, render_geojson_layer, render_line_layer,
+        render_point_layer, deck, osm_basemap_deck
+    )
+    from urbantechcluster.utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
+
 
 
 # ==========================
@@ -835,3 +854,4 @@ def chi2_between(df: pd.DataFrame, col_a: str, col_b: str):
 def corr_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
     num = df.select_dtypes(include=[np.number])
     return num.corr(method=method).replace([np.inf, -np.inf], np.nan)
+
