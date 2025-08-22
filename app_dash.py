@@ -388,7 +388,33 @@ def pairs_to_matrix(df_pairs: pd.DataFrame, i_col: str, j_col: str, val_col: str
 # ==========================
 # IMPORTA A ABA 4 (PCA)
 # ==========================
-from ml_pca_tab import render_pca_tab  # o arquivo ml_pca_tab.py deve estar no MESMO diretório
+# --- Import da aba PCA de forma resiliente ---
+def _import_render_pca_tab():
+    try:
+        # 1) mesmo diretório do app_dash.py
+        from ml_pca_tab import render_pca_tab as _render
+        return _render
+    except ModuleNotFoundError:
+        try:
+            # 2) import absoluto, se o pacote `urbantechcluster` existir
+            from urbantechcluster.ml_pca_tab import render_pca_tab as _render
+            return _render
+        except ModuleNotFoundError:
+            # 3) carregar pelo caminho do arquivo (fallback)
+            import importlib.util, sys, os
+            here = os.path.dirname(__file__)
+            cand = os.path.join(here, "ml_pca_tab.py")
+            if os.path.exists(cand):
+                spec = importlib.util.spec_from_file_location("ml_pca_tab", cand)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["ml_pca_tab"] = mod
+                spec.loader.exec_module(mod)
+                return mod.render_pca_tab
+            # se chegou aqui, realmente não existe o arquivo
+            raise
+
+render_pca_tab = _import_render_pca_tab()
+
 
 # ==========================
 # TABS
@@ -949,4 +975,5 @@ with tab4:
             _render_scores_section(df_scores, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv)
         else:
             st.info("Nenhum arquivo de *scores* identificado.")
+
 
