@@ -773,7 +773,7 @@ with tab1:
         if join_col is None:
             st.error("Dataset selecionado não possui coluna 'SQ'."); st.stop()
         years = sorted([int(y) for y in df_vars["Ano"].dropna().unique()]) if "Ano" in df_vars.columns else []
-        year = st.select_slider("Ano", options=years, value=years[-1]) if years else None
+        year = st.select_slider("Ano", options=years, value=years[-1], key="main_ano") if years else None
         if year: df_vars = df_vars[df_vars["Ano"]==year]
 
     with col3:
@@ -877,36 +877,27 @@ with tab2:
     # 2.1) Carregar CLUSTERS (fixo no diretório de Originais)
     # -----------------------------
     clusters_dir = "Data/dados/Originais"
-    fixed_cluster_names = ["EstagioClusterizacao.csv", "EstagioClusterizacao.parquet"]
 
-    df_est = None
-    # tenta nomes fixos primeiro
-    for nm in fixed_cluster_names:
-        try:
-            path_try = f"{clusters_dir}/{nm}"
-            df_est = load_parquet(repo, path_try, branch) if nm.endswith(".parquet") else load_csv(repo, path_try, branch)
-            break
-        except Exception:
-            pass
-
-    # fallback: qualquer arquivo com "EstagioClusterizacao" no nome lá dentro
-    if df_est is None:
-        candidates = [f for f in list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
-                      if "estagioclusterizacao" in f["name"].lower()]
-        if not candidates:
-            st.error(f"Não encontrei EstagioClusterizacao em `{clusters_dir}`.")
-            st.stop()
-        sel_estagio = st.selectbox("Arquivo de clusters (EstagioClusterizacao)", [f["name"] for f in candidates],
-                                   index=0, key="clu_estagio_file")
-        est_file = next(x for x in candidates if x["name"] == sel_estagio)
-        df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].endswith(".parquet") else load_csv(repo, est_file["path"], branch)
-
-    # filtro por Ano (se existir)
+    # lista só csv/parquet e filtra por nome EXATO (case-insensitive)
+    all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
+    cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
+    
+    if not cand:
+        st.error(
+            f"Não encontrei `EstagioClusterizacao.csv` ou `EstagioClusterizacao.parquet` em `{clusters_dir}`.\n"
+            f"Coloque o arquivo com esse nome exato (case-insensitive)."
+        )
+        st.stop()
+    
+    est_file = cand[0]  # único esperado
+    df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
+    
+    # filtro por Ano (se existir) — com key exclusivo
     years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
     year_sel = st.select_slider("Ano", options=years, value=years[-1], key="clu_ano") if years else None
     if year_sel is not None:
         df_est = df_est[df_est["Ano"] == year_sel]
-
+    
     # coluna de cluster (prioriza EstagioClusterizacao)
     cluster_cols = [c for c in df_est.columns if ("cluster" in c.lower()) or ("estagio" in c.lower()) or (c.lower() == "label")]
     if not cluster_cols:
@@ -1154,6 +1145,7 @@ with tab4:
     )
     
     
+
 
 
 
