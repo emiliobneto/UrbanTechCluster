@@ -1305,40 +1305,26 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (somente leitura/visualização) — REWRITE
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (somente leitura/visualização) — FIX SQ 6 dígitos
+# ABA 2 — Clusterização (leve e rápida)
 # -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa de Clusters + Métricas + Spearman (somente leitura)")
 
-    # -------- helpers --------
     import re as _re
 
+    # ---------- helpers (rápidos) ----------
     def _norm_sq_6(x, digits: int = 6) -> str | None:
-        """
-        Normaliza SQ preservando zeros à esquerda:
-        - remove espaços;
-        - mantém apenas dígitos;
-        - se >6 dígitos, usa os ÚLTIMOS 6 (casos com prefixos);
-        - preenche à esquerda até 6 dígitos.
-        """
         if x is None or (isinstance(x, float) and np.isnan(x)):
             return None
         s = str(x).strip()
-        s = _re.sub(r"\s+", "", s)
-        s = _re.sub(r"\D", "", s)  # somente dígitos
+        s = _re.sub(r"\D", "", s)  # mantém só dígitos
         if s == "":
             return None
         if len(s) > digits:
-            s = s[-digits:]  # usa os últimos 6 dígitos
+            s = s[-digits:]         # pega os ÚLTIMOS 6
         return s.zfill(digits)
 
     def _to_int_code(x):
-        """Extrai 0..3 de string/float/inteiro; retorna None se não achar."""
-        if x is None or (isinstance(x, float) and np.isnan(x)):
-            return None
         try:
             v = float(str(x).strip())
             if np.isfinite(v) and abs(v - int(v)) < 1e-9:
@@ -1355,15 +1341,13 @@ with tab2:
         3: "3 – Clusterizado",
     }
 
-    # -----------------------------
-    # 2.1) Seleção do arquivo de clusters (GitHub + upload opcional)
-    # -----------------------------
-    st.caption("Fonte primária: GitHub. Você pode enviar um arquivo local para testes.")
-    up = st.file_uploader(
-        "EstagioClusterizacao (opcional: .csv ou .parquet)",
-        type=["csv", "parquet"],
-        key="clu_upl",
-    )
+    # ---------- fonte dos clusters (upload opcional ou GitHub) ----------
+    colTopL, colTopR = st.columns([2,1])
+    with colTopL:
+        up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv", "parquet"], key="clu_upl")
+    with colTopR:
+        simplify_tol = st.slider("Simplificação da geometria (°)", 0.0, 0.0008, 0.0002, 0.0001,
+                                 help="Valores maiores = menos vértices = mais rápido.")
 
     if up is not None:
         df_est = pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up)
@@ -1386,14 +1370,12 @@ with tab2:
         df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
         source_label = f"{clusters_dir}/{est_file['name']}"
 
-    # -----------------------------
-    # 2.2) Ano + coluna de cluster
-    # -----------------------------
+    # ---------- ano + coluna ----------
     join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
     if not join_est:
-        st.error("O arquivo de clusters não possui coluna 'SQ'.")
-        st.stop()
+        st.error("O arquivo de clusters não possui coluna 'SQ'."); st.stop()
 
+    # Filtro de ano ANTES do merge
     ano_col = next((c for c in df_est.columns if str(c).lower() == "ano"), None)
     if ano_col:
         anos_vals = pd.to_numeric(df_est[ano_col], errors="coerce")
@@ -1402,20 +1384,15 @@ with tab2:
             year_sel = st.select_slider("Ano (clusters)", options=anos_ok, value=anos_ok[-1], key="clu_ano")
             df_est = df_est.loc[anos_vals.astype("Int64") == year_sel].copy()
             if df_est.empty:
-                st.error(f"Sem registros de cluster para o ano {year_sel} em {source_label}.")
-                st.stop()
+                st.error(f"Sem registros de cluster para o ano {year_sel} em {source_label}."); st.stop()
 
     cluster_cols = [c for c in df_est.columns if _re.search(r"(?i)(cluster|estagio|label)", c)]
     if not cluster_cols:
-        st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
-        st.stop()
+        st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label)."); st.stop()
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
 
-    # -----------------------------
-    # 2.3) Normalizar SQ (6 dígitos) e resolver duplicados por SQ
-    # -----------------------------
-    # Quadras
+    # ---------- quadras (somente colunas necessárias) ----------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
@@ -1427,117 +1404,108 @@ with tab2:
 
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not join_quad:
-        st.error("A camada de quadras não possui coluna 'SQ'.")
-        st.stop()
+        st.error("A camada de quadras não possui coluna 'SQ'."); st.stop()
 
+    # Mantém só geometry + SQ (deixa leve)
+    gdfq = gdf_quadras[[join_quad, gdf_quadras.geometry.name]].copy()
+
+    # ---------- normaliza SQ e resolve duplicados ----------
     df_est = df_est.copy()
-    gdfq = gdf_quadras.copy()
-
-    df_est["_SQ_norm"] = df_est[join_est].apply(_norm_sq_6)
     gdfq["_SQ_norm"] = gdfq[join_quad].apply(_norm_sq_6)
-
-    # manter MAIOR estágio por SQ dentro do ano
+    df_est["_SQ_norm"] = df_est[join_est].apply(_norm_sq_6)
     df_est["_cl_code"] = df_est[cluster_col].apply(_to_int_code).fillna(-1)
-    df_est = df_est.sort_values(["_SQ_norm", "_cl_code"])  # -1 primeiro, maiores por último
+    df_est = df_est.sort_values(["_SQ_norm", "_cl_code"])      # maior estágio por último
     df_est_dedup = df_est.drop_duplicates("_SQ_norm", keep="last")
 
-    # -----------------------------
-    # 2.4) MERGE e rótulos
-    # -----------------------------
+    # ---------- (opcional) Recorte ANTES do merge para reduzir linhas ----------
+    st.markdown("#### Mapa — Recortes (opcional)")
+    rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
+    rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
+    gdf_rec = None
+    if rec_files:
+        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files], index=0, key="clu_rec_file")
+        if rec_sel != "(sem recorte)":
+            rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
+            gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
+            join_rec = next((c for c in gdf_rec.columns if str(c).upper() == "SQ"), None)
+            if join_rec:
+                gdf_rec = gdf_rec.copy()
+                gdf_rec["_SQ_norm"] = gdf_rec[join_rec].apply(_norm_sq_6)
+                sq_keep = set(gdf_rec["_SQ_norm"].dropna().unique().tolist())
+                gdfq = gdfq[gdfq["_SQ_norm"].isin(sq_keep)].copy()
+
+    # ---------- merge leve ----------
     gdfc = gdfq.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
 
-    # rótulo amigável a partir do código (0..3); caso não identifique, mantém texto original
-    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0, 1, 2, 3]))
+    # labels elegantes
+    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0,1,2,3]))
     gdfc["cluster_lbl"] = np.where(
         gdfc["_cl_code_clean"].notna(),
         gdfc["_cl_code_clean"].astype(int).map(label_map),
         gdfc[cluster_col].astype(str),
     )
 
-    # ordem da legenda por código 0->3 (apenas os presentes); fallback: ordem alfabética dos demais
+    # legenda ordenada 0→3 + outros
     codes_present = [int(x) for x in sorted(gdfc["_cl_code_clean"].dropna().unique())]
     labels_from_codes = [label_map[c] for c in codes_present]
     other_labels = sorted([l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
     cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
-
     palette = pick_categorical(len(cats_sorted))
     cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
 
-    gdfc["value"] = gdfc["cluster_lbl"]
+    # ---------- cor como coluna (sem loop em features) ----------
+    gdfc = gdfc[[gdfc.geometry.name, "_SQ_norm", "cluster_lbl"]].copy()
+    gdfc["fill_color"] = gdfc["cluster_lbl"].map(cmap).apply(hex_to_rgba)
 
-    # -----------------------------
-    # 2.5) MAPA principal + legenda
-    # -----------------------------
-    gj = make_geojson(gdfc)
-    for feat in gj.get("features", []):
-        lab = feat.get("properties", {}).get("value", None)
-        hexc = cmap.get(lab, "#999999")
-        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+    # ---------- simplificação opcional ----------
+    if simplify_tol and simplify_tol > 0:
+        try:
+            gdfc[gdfc.geometry.name] = gdfc[gdfc.geometry.name].simplify(simplify_tol, preserve_topology=True)
+        except Exception:
+            pass
+
+    # ---------- GeoJSON & MAPAS ----------
+    # (to_json já carrega 'fill_color' como propriedade; sem loops Python)
+    geojson_main = make_geojson(gdfc)
 
     colM, colL = st.columns([4.5, 1], gap="large")
     with colM:
         st.markdown("#### Mapa — Clusters por SQ")
         base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+        lyr = render_geojson_layer(geojson_main, name="clusters")
         if base_map.startswith("Satélite"):
-            deck([render_geojson_layer(gj, name="clusters")], satellite=True)
+            deck([lyr], satellite=True)
         else:
-            osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
+            osm_basemap_deck([lyr])
     with colL:
         st.markdown("**Legenda — Estágio**")
         for lab in cats_sorted:
             _legend_row(cmap[lab], lab)
 
-    st.divider()
-
-    # -----------------------------
-    # 2.6) MAPA — Recortes (com mesma variável/cores)
-    # -----------------------------
-    st.markdown("#### Mapa — Recortes (opcional)")
-    rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
-    try:
-        rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
-        if rec_files:
-            rec_sel = st.selectbox("Arquivo de recorte", [f["name"] for f in rec_files], index=0, key="clu_rec_file")
-            rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
-            gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-
-            # filtrar por SQ do recorte, se existir coluna SQ no recorte
-            join_rec = next((c for c in gdf_rec.columns if str(c).upper() == "SQ"), None)
-            if join_rec:
-                gdf_rec = gdf_rec.copy()
-                gdf_rec["_SQ_norm"] = gdf_rec[join_rec].apply(_norm_sq_6)
-                sq_keep = set(gdf_rec["_SQ_norm"].dropna().unique().tolist())
-                gdfc_rec = gdfc[gdfc["_SQ_norm"].isin(sq_keep)].copy()
+    # ---------- mapa do recorte (se houver) com MESMAS cores ----------
+    if gdf_rec is not None:
+        st.markdown("#### Mapa — Recorte selecionado")
+        # Reusa gdfc já filtrado por recorte (lá em cima)
+        geojson_rec = make_geojson(gdfc)
+        lyr_rec = render_geojson_layer(geojson_rec, name="clusters_recorte")
+        border = render_line_layer(make_geojson(gdf_rec), name="recorte")
+        colRm, colRl = st.columns([4.5, 1], gap="large")
+        with colRm:
+            if base_map.startswith("Satélite"):
+                deck([lyr_rec, border], satellite=True)
             else:
-                gdfc_rec = gdfc.head(0).copy()
-
-            layers_rec = []
-            if len(gdfc_rec) > 0:
-                gj_rec = make_geojson(gdfc_rec)
-                for feat in gj_rec.get("features", []):
-                    lab = feat.get("properties", {}).get("value", None)
-                    hexc = cmap.get(lab, "#999999")
-                    feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
-                layers_rec.append(render_geojson_layer(gj_rec, name="clusters_recorte"))
-
-            layers_rec.append(render_line_layer(make_geojson(gdf_rec), name="recorte"))
-
-            colRm, colRl = st.columns([4.5, 1], gap="large")
-            with colRm:
-                if base_map.startswith("Satélite"):
-                    deck(layers_rec, satellite=True)
-                else:
-                    osm_basemap_deck(layers_rec)
-            with colRl:
-                st.markdown("**Legenda — Recorte**")
-                for lab in cats_sorted:
-                    _legend_row(cmap[lab], lab)
-        else:
-            st.caption(f"Pasta `{rec_dir}` vazia.")
-    except Exception as e:
-        st.warning(f"Não foi possível listar/ler recortes: {e}")
+                osm_basemap_deck([lyr_rec, border])
+        with colRl:
+            st.markdown("**Legenda — Recorte**")
+            for lab in cats_sorted:
+                _legend_row(cmap[lab], lab)
 
     st.divider()
+
+    # -----------------------------
+    # (seus blocos de MÉTRICAS e SPEARMAN podem continuar abaixo, inalterados)
+    # -----------------------------
+
     # ------------------------------------------
     # 2.7 Spearman (pares) — tabela + heatmap
     # ------------------------------------------
@@ -1729,6 +1697,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
