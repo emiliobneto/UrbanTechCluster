@@ -1,377 +1,65 @@
+import json
+import itertools
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import pydeck as pdk
+import streamlit as st
+from scipy import stats
+import io
+import requests
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
-import requests
-import itertools
-from scipy import stats
-import pydeck as pdk
-import json
 
-
-# ==========================
-# CONFIGURAÇÃO GERAL
-# ==========================
-st.set_page_config(
-    page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
-    page_icon="🧠",
-    layout="wide",
-)
+# ===== App config
+st.set_page_config(page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
+                   page_icon="🧠", layout="wide")
 TITLE = "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
 st.title(TITLE)
 
-# ==========================
-# HELPERS: GitHub I/O
-# ==========================
-API_BASE = "https://api.github.com"
-RAW_BASE = "https://raw.githubusercontent.com"
+# ===== Utils (módulos locais)
+from utils.github_io import (
+    normalize_repo, resolve_branch, list_files, github_tree_paths,
+    load_csv, load_parquet, load_gpkg, pick_existing_dir
+)
+from utils.colors import pick_categorical, pick_sequential, hex_to_rgba
+from utils.classify import is_categorical, jenks_breaks
+from utils.maps import (
+    make_geojson, render_geojson_layer, render_line_layer,
+    render_point_layer, deck, osm_basemap_deck
+)
+from utils.stats_tools import chi2_between, corr_matrix, pairwise_ttests
 
-def normalize_repo(owner_repo: str) -> str:
-    s = (owner_repo or "").strip()
-    s = s.replace("https://github.com/", "").replace("http://github.com/", "")
-    s = s.strip("/")
-    parts = [p for p in s.split("/") if p]
-    if len(parts) < 2:
-        raise RuntimeError("Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechClusters'")
-    return f"{parts[0]}/{parts[1]}"
-
-@st.cache_data(show_spinner=True)
-def github_repo_info(owner_repo: str) -> dict:
-    owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
-    return r.json()
-
-def resolve_branch(owner_repo: str, user_branch: str) -> str:
-    """Tenta usar o branch informado; se 404, cai no default_branch do repo."""
-    owner_repo = normalize_repo(owner_repo)
-    b = (user_branch or "").strip()
-    if b:
-        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
-        r = requests.get(url, headers=_gh_headers(), timeout=60)
-        if r.status_code == 200:
-            return b
-    info = github_repo_info(owner_repo)
-    return info.get("default_branch", "main")
-
-def _secret(path, default=None):
-    cur = st.secrets
-    try:
-        for p in path:
-            cur = cur[p]
-        return cur
-    except Exception:
-        return default
-
-def _gh_headers():
-    token = _secret(["github","token"], None)
-    h = {"Accept": "application/vnd.github+json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
-
-def build_raw_url(owner_repo: str, path: str, branch: str) -> str:
-    owner_repo = owner_repo.strip("/")
-    path = path.lstrip("/")
-    return f"{RAW_BASE}/{owner_repo}/{branch}/{path}"
-
-@st.cache_data(show_spinner=False)
-def github_listdir(owner_repo: str, path: str, branch: str):
-    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
-    return r.json()
-
-@st.cache_data(show_spinner=True)
-def load_parquet(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
-    url = build_raw_url(owner_repo, path, branch)
-    return pd.read_parquet(url, engine="pyarrow")
-
-@st.cache_data(show_spinner=True)
-def load_csv(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
-    url = build_raw_url(owner_repo, path, branch)
-    return pd.read_csv(url)
-
-@st.cache_data(show_spinner=True)
-def github_get_contents(owner_repo: str, path: str, branch: str) -> dict:
-    """Busca o metadata do arquivo na GitHub Contents API (funciona com LFS)."""
-    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
-    return r.json()
-
-@st.cache_data(show_spinner=True)
-def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
-    """Baixa o binário do arquivo respeitando LFS/privado e valida conteúdo."""
-    meta = github_get_contents(owner_repo, path, branch)
-    # quando listamos diretório, não guardamos o download_url; pegue-o aqui:
-    download_url = meta.get("download_url") or build_raw_url(owner_repo, path, branch)
-    r = requests.get(download_url, headers=_gh_headers(), timeout=180)
-    if r.status_code != 200:
-        ct = r.headers.get("Content-Type", "")
-        raise RuntimeError(f"Download falhou ({r.status_code}, Content-Type={ct}). Verifique token/privacidade.")
-    data = r.content
-
-    # 1) Ponteiro Git LFS?
-    if data.startswith(b"version https://git-lfs.github.com/spec"):
-        raise RuntimeError(
-            "Recebi um ponteiro Git LFS em vez do binário .gpkg. "
-            "Adicione um GitHub token em st.secrets['github']['token'] ou use o 'download_url' real."
-        )
-    # 2) HTML/JSON (rate limit, 404 etc)?
-    head = data[:200].strip().lower()
-    if head.startswith(b"<!doctype html") or head.startswith(b"<html") or head.startswith(b"{"):
-        ct = r.headers.get("Content-Type", "")
-        raise RuntimeError(
-            f"Recebi HTML/JSON em vez do .gpkg (Content-Type={ct}). "
-            "Provável rate limit/privado. Defina st.secrets['github']['token']."
-        )
-    return data
-
-@st.cache_data(show_spinner=True)
-def load_gpkg(owner_repo: str, path: str, branch: str, layer: str = None):
-    """Baixa um .gpkg do GitHub de forma robusta e lê com o engine pyogrio."""
-    try:
-        import geopandas as gpd  # type: ignore
-    except Exception as e:
-        raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
-
-    blob = github_fetch_bytes(owner_repo, path, branch)
-    import tempfile, os
-    with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
-        tmp.write(blob)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    try:
-        # Force o engine pyogrio (muito mais robusto no Streamlit Cloud)
-        return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")  # type: ignore
-    except Exception as e:
-        # fallback: tente sem engine (Fiona), caso pyogrio não esteja disponível no runtime
-        try:
-            return gpd.read_file(tmp_path, layer=layer)  # type: ignore
-        except Exception as e2:
-            raise RuntimeError(
-                f"Falha lendo {path} como GPKG. "
-                f"Tente instalar/atualizar `geopandas>=1.0` e `pyogrio>=0.9`, "
-                f"ou verifique se o arquivo não é um ponteiro LFS."
-            ) from e2
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
-    items = github_listdir(owner_repo, path, branch)
-    out = []
-    for it in items:
-        if it.get("type") == "file":
-            nm = it["name"]
-            if any(nm.lower().endswith(e) for e in exts):
-                out.append({"path": f"{path}/{nm}", "name": nm})
-    return out
-
-@st.cache_data(show_spinner=True)
-def github_branch_info(owner_repo: str, branch: str) -> dict:
-    """Pega metadados do branch (inclui o SHA do tree raiz)."""
-    url = f"{API_BASE}/repos/{owner_repo}/branches/{branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text}")
-    return r.json()
-
-@st.cache_data(show_spinner=True)
-def github_tree_paths(owner_repo: str, branch: str) -> list[str]:
-    """Lista TODOS os caminhos de arquivo (blobs) do repo/branch (recursivo)."""
-    info = github_branch_info(owner_repo, branch)
-    tree_sha = info["commit"]["commit"]["tree"]["sha"]
-    url = f"{API_BASE}/repos/{owner_repo}/git/trees/{tree_sha}?recursive=1"
-    r = requests.get(url, headers=_gh_headers(), timeout=180)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
-    tree = r.json().get("tree", [])
-    return [ent["path"] for ent in tree if ent.get("type") == "blob"]
-# ==========================
-# HELPERS: cores e mapas
-# ==========================
-def hex_to_rgb(hex_color: str):
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
-    return (r, g, b, 180)
-
-SEQUENTIAL = {
-    4: ['#fee8d8','#fdbb84','#fc8d59','#d7301f'],
-    5: ['#feedde','#fdbe85','#fd8d3c','#e6550d','#a63603'],
-    6: ['#feedde','#fdd0a2','#fdae6b','#fd8d3c','#e6550d','#a63603'],
-    7: ['#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#e6550d','#a63603'],
-    8: ['#fff5f0','#fee0d2','#fcbba1','#fc9272','#fb6a4a','#ef3b2c','#cb181d','#99000d'],
-}
-CATEGORICAL = [
-    '#7c3aed','#d946ef','#fb7185','#f97316','#f59e0b','#facc15','#fde047',
-    '#a16207','#9a3412','#b91c1c','#ea580c','#be185d','#9333ea','#6b21a8',
-    '#a21caf','#c026d3','#db2777','#e11d48','#eab308','#f43f5e'
-]
-def pick_sequential(n: int):
-    n = max(4, min(8, n))
-    return SEQUENTIAL.get(n, SEQUENTIAL[6])
-def pick_categorical(k: int):
-    if k <= len(CATEGORICAL):
-        return CATEGORICAL[:k]
-    reps = (k // len(CATEGORICAL)) + 1
-    return (CATEGORICAL * reps)[:k]
-
-def ensure_wgs84(gdf):
-    try:
-        if hasattr(gdf, "crs") and gdf.crs and str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
-            return gdf.to_crs(4326)
-    except Exception:
-        pass
-    return gdf
-
-def make_geojson(gdf) -> dict:
-    gdf = ensure_wgs84(gdf)
-    return json.loads(gdf.to_json())
-
-def attach_fill_color(geojson_obj: dict, color_map: dict, prop: str = "value") -> dict:
-    for feat in geojson_obj.get("features", []):
-        val = feat.get("properties", {}).get(prop, None)
-        hexc = color_map.get(val, "#999999")
-        feat.setdefault("properties", {})["fill_color"] = hex_to_rgb(hexc)
-    return geojson_obj
-
-def render_geojson_layer(geojson_obj: dict, name: str = "Polygons") -> pdk.Layer:
-    return pdk.Layer(
-        "GeoJsonLayer",
-        geojson_obj,
-        pickable=True,
-        stroked=False,
-        filled=True,
-        extruded=False,
-        get_fill_color="properties.fill_color",
-        get_line_color=[100,100,100],
-        get_line_width=0.5,
-        auto_highlight=True
-    )
-
-def render_line_layer(geojson_obj: dict, name: str = "Lines") -> pdk.Layer:
-    return pdk.Layer(
-        "GeoJsonLayer",
-        geojson_obj,
-        pickable=True,
-        stroked=True,
-        filled=False,
-        get_line_color=[30,30,30],
-        get_line_width=2
-    )
-
-def render_point_layer(geojson_obj: dict, name: str = "Points") -> pdk.Layer:
-    return pdk.Layer(
-        "GeoJsonLayer",
-        geojson_obj,
-        pickable=True,
-        point_type="circle",
-        get_fill_color=[60,60,60,220],
-        get_radius=60,
-    )
-
-def deck(layers, satellite=False, initial_view_state=None):
-    token = st.secrets.get("mapbox", {}).get("token", None)
-    map_style = "mapbox://styles/mapbox/light-v11"
-    if satellite:
-        map_style = "mapbox://styles/mapbox/satellite-streets-v12"
-    r = pdk.Deck(
-        layers=layers,
-        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
-        map_style=map_style,
-        api_keys={"mapbox": token} if token else None,
-        tooltip={"text": "{name}\n{value}"}
-    )
-    st.pydeck_chart(r, use_container_width=True)
-
-def osm_basemap_deck(layers, initial_view_state=None):
-    tile = pdk.Layer(
-        "TileLayer",
-        data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    )
-    r = pdk.Deck(
-        layers=[tile] + layers,
-        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
-        map_style=None,
-    )
-    st.pydeck_chart(r, use_container_width=True)
 
 # ==========================
-# HELPERS: classificação & estatística
-# ==========================
-def jenks_breaks(values: pd.Series, k: int):
-    import mapclassify as mc
-    vals = values.dropna().astype(float).values
-    if len(np.unique(vals)) < max(4, k):
-        k = min(len(np.unique(vals)), max(2, k))
-    nb = mc.NaturalBreaks(vals, k=k, initial=200)
-    bins = [-float("inf")] + list(nb.bins)
-    binned = pd.cut(values, bins=bins, labels=False, include_lowest=True)
-    return bins, binned
-
-def is_categorical(series: pd.Series) -> bool:
-    if series.dtype.kind in ("O","b","M","m","U","S"):
-        return True
-    return series.dropna().nunique() <= 12
-
-def pairwise_ttests(df: pd.DataFrame, group_col: str, value_col: str, equal_var: bool = False) -> pd.DataFrame:
-    groups = [g for g in df[group_col].dropna().unique()]
-    rows = []
-    for a,b in itertools.combinations(groups, 2):
-        x = df.loc[df[group_col]==a, value_col].dropna().astype(float)
-        y = df.loc[df[group_col]==b, value_col].dropna().astype(float)
-        if len(x) >= 2 and len(y) >= 2:
-            t, p = stats.ttest_ind(x, y, equal_var=equal_var, nan_policy='omit')
-            rows.append({"grupo_a": a, "grupo_b": b, "t": float(t), "p_value": float(p)})
-    return pd.DataFrame(rows)
-
-def chi2_between(df: pd.DataFrame, col_a: str, col_b: str):
-    tbl = pd.crosstab(df[col_a], df[col_b])
-    chi2, p, dof, expected = stats.chi2_contingency(tbl, correction=False)
-    return {"chi2": float(chi2), "p_value": float(p), "dof": int(dof), "table": tbl}
-
-def corr_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
-    num = df.select_dtypes(include=[np.number])
-    return num.corr(method=method).replace([np.inf, -np.inf], np.nan)
-
-# ==========================
-# SIDEBAR (GitHub & Mapbox)
+# Sidebar: GitHub & Mapbox
 # ==========================
 with st.sidebar:
     st.header("🔗 Fonte dos Dados (GitHub)")
-    repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechClusters")
-    branch_input = st.text_input("branch", value="main")
-    
-    # resolvidos (sem espaços/URL e com branch válido)
+    repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster")
+    branch_input = st.text_input("branch (vazio = auto)", value="")
+    st.caption("A busca de arquivos usa Contents API e Tree API (fallback).")
+
+    # Resolve repo/branch
     try:
         repo = normalize_repo(repo_input)
         branch = resolve_branch(repo, branch_input)
-        st.caption(f"Usando: {repo}@{branch}")
+        st.caption(f"Usando: **{repo}@{branch}**")
     except Exception as e:
-        st.error(f"Configuração de repositório inválida: {e}")
+        st.error(f"Configuração inválida: {e}")
         st.stop()
 
-    st.caption("Listagem via GitHub Contents API e download via raw.")
     st.divider()
     st.header("🗺️ Mapbox (opcional)")
     st.caption("Defina `mapbox.token` em secrets para habilitar satélite.")
 
-if not repo or not branch:
-    st.stop()
 
 # ==========================
 # TABS (4 abas)
 # ==========================
-tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"]
+)
 
 # -----------------------------------------------------------------------------
 # ABA 1 — Principal
@@ -380,25 +68,21 @@ with tab1:
     st.subheader("Quadras e camadas adicionais (GPKG)")
     colA, colB = st.columns([2,1], gap="large")
     with colA:
-        st.caption("Carrega `Data/mapa/quadras.gpkg` e sobrepõe camadas auxiliares (`linhas`, `estações`, `água`, etc.).")
+        st.caption("Carrega `Data/mapa/quadras.gpkg` e sobrepõe camadas auxiliares (linhas/estações/água).")
     with colB:
         basemap = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0)
 
-    # --- Carregamento robusto das quadras (com cache e fallback) ---
-
+    # --- Carregamento robusto das quadras (cache + fallback por Tree API)
     quadras_path_default = "Data/mapa/quadras.gpkg"
-    
-    # 1) tenta cache
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
-    
+
     if gdf_quadras is None:
-        # 2) tenta caminho padrão
         first_err = None
         try:
             gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
         except Exception as e:
             first_err = e
-            # 3) fallback: busca no repositório inteiro por qualquer 'quadras.gpkg'
+            # Procura qualquer arquivo 'quadras.gpkg' no repo
             all_paths = github_tree_paths(repo, branch)
             candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
             candidates = sorted(
@@ -407,77 +91,56 @@ with tab1:
             )
             if not candidates:
                 st.error(
-                    f"Não encontrei 'quadras.gpkg' no repositório (branch '{branch}'). "
+                    f"Não encontrei 'quadras.gpkg' no repositório ({repo}@{branch}). "
                     f"Erro ao tentar '{quadras_path_default}': {first_err}"
                 )
                 st.stop()
-    
             sel_quadras = st.selectbox(
                 "Selecione o arquivo de quadras (.gpkg) detectado no repositório:",
-                candidates,
-                index=0,
-                key="quadras_tab1"
+                candidates, index=0, key="quadras_tab1"
             )
             gdf_quadras = load_gpkg(repo, sel_quadras, branch)
             st.success(f"Carregado: {sel_quadras}")
-    
-        # 4) salva no cache só DEPOIS de obter o GeoDataFrame
+
         st.session_state["gdf_quadras_cached"] = gdf_quadras
 
-    
-    if gdf_quadras is None:
-        try:
-            all_paths = github_tree_paths(repo, branch)
-            candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
-            # Preferir caminhos que contenham /data/ e /mapa/
-            candidates = sorted(
-                candidates,
-                key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p))
-            )
-            if not candidates:
-                st.error(
-                    f"Não encontrei 'quadras.gpkg' no repositório (branch '{branch}'). "
-                    f"Erro ao tentar '{quadras_path_default}': {first_err}"
-                )
-                st.stop()
-            sel_quadras = st.selectbox(
-                "Selecione o arquivo de quadras (.gpkg) detectado no repositório:",
-                candidates,
-                index=0
-            )
-            gdf_quadras = load_gpkg(repo, sel_quadras, branch)
-            st.success(f"Carregado: {sel_quadras}")
-        except Exception as e2:
-            st.error(f"Erro carregando quadras (fallback de busca): {e2}\nErro original: {first_err}")
-            st.stop()
-
+    # --- Camadas auxiliares (se existirem)
     try:
-        mapa_files = list_files(repo, "Data/mapa", branch, (".gpkg",))
+        mapa_dir = pick_existing_dir(repo, branch, ["Data/mapa", "data/mapa", "Data/Mapa"])
+        mapa_files = list_files(repo, mapa_dir, branch, (".gpkg",))
         other_layers = [f for f in mapa_files if f["name"].lower() != "quadras.gpkg"]
         layer_names = [f["name"] for f in other_layers]
         sel_layers = st.multiselect("Camadas auxiliares (opcional)", layer_names, default=[])
         loaded_layers = []
         for nm in sel_layers:
-            f = next(x for x in other_layers if x["name"] == nm)
-            g = load_gpkg(repo, f["path"], branch)
+            fobj = next(x for x in other_layers if x["name"] == nm)
+            g = load_gpkg(repo, fobj["path"], branch)
             loaded_layers.append((nm, g))
     except Exception as e:
         st.warning(f"Não foi possível listar/ler camadas em Data/mapa: {e}")
         loaded_layers = []
 
+    # -------- Dados por SQ
     st.subheader("Dados por `SQ` para espacialização")
     col1, col2, col3 = st.columns([1.6,1,1.2], gap="large")
 
+    # escolher base 'originais' vs 'winsorize' considerando variações de caixa/nome
     with col1:
-        src_type = st.radio("Origem dos dados", ["originais", "winsorize"], index=0, horizontal=True)
-        base_path = f"Data/dados/{src_type}"
-        parquet_files = list_files(repo, base_path, branch, (".parquet",))
+        src_label = st.radio("Origem dos dados", ["originais", "winsorize"], index=0, horizontal=True)
+        base_dir = pick_existing_dir(
+            repo, branch,
+            [f"Data/dados/{src_label}",
+             f"Data/Dados/{src_label}",
+             f"Data/dados/{'Originais' if src_label=='originais' else 'winsorizados'}",
+             f"Data/dados/{'originais' if src_label=='originais' else 'winsorizados'}"]
+        )
+        parquet_files = list_files(repo, base_dir, branch, (".parquet",))
         if not parquet_files:
-            st.warning(f"Sem .parquet em {base_path}.")
+            st.warning(f"Sem .parquet em {base_dir}.")
             st.stop()
         sel_file = st.selectbox("Arquivo .parquet com variáveis", [f["name"] for f in parquet_files])
-        file_obj = next(x for x in parquet_files if x["name"] == sel_file)
-        df_vars = load_parquet(repo, file_obj["path"], branch)
+        fobj = next(x for x in parquet_files if x["name"] == sel_file)
+        df_vars = load_parquet(repo, fobj["path"], branch)
 
     with col2:
         join_col = next((c for c in df_vars.columns if c.upper()=="SQ" or c=="SQ"), None)
@@ -519,7 +182,11 @@ with tab1:
         cmap = {i: palette[i] for i in range(len(palette))}
 
     geojson = make_geojson(gdf)
-    geojson = attach_fill_color(geojson, cmap, prop="value")
+    # anexa cores RGBA
+    for feat in geojson.get("features", []):
+        val = feat.get("properties", {}).get("value", None)
+        hexc = cmap.get(val, "#999999")
+        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
     layers = [render_geojson_layer(geojson, name="quadras")]
     for nm, g in loaded_layers:
@@ -541,39 +208,51 @@ with tab1:
     else:
         osm_basemap_deck(layers)
 
-    # Recortes
+    # -------- Recortes
     st.subheader("Recortes espaciais (GPKG)")
-    st.caption("Selecione um dos GPKGs em `Data/mapa/recortes` para visualizar.")
+    st.caption("Seleciona GPKGs em `Data/mapa/recortes` (com fallback por busca).")
     try:
-        recorte_files = list_files(repo, "Data/mapa/recortes", branch, (".gpkg",))
+        rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
+        recorte_files = list_files(repo, rec_dir, branch, (".gpkg",))
         if not recorte_files:
-            st.info("Pasta `Data/mapa/recortes` vazia.")
-        else:
-            rec_sel = st.selectbox("Arquivo de recorte", [f["name"] for f in recorte_files])
-            rec_obj = next(x for x in recorte_files if x["name"] == rec_sel)
-            gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-            gj_rec = make_geojson(gdf_rec)
-            layers_rec = [render_geojson_layer(gj_rec, name="recorte")]
-            st.markdown("#### Mapa — Recorte selecionado")
-            if basemap.startswith("Satélite"):
-                deck(layers_rec, satellite=True)
+            # fallback por tree
+            all_paths = github_tree_paths(repo, branch)
+            rec_paths = [p for p in all_paths if p.lower().endswith(".gpkg") and "/recortes/" in p.lower()]
+            if not rec_paths:
+                st.info("Nenhum GPKG de recorte encontrado.")
             else:
-                osm_basemap_deck(layers_rec)
+                rec_sel = st.selectbox("Arquivo de recorte", rec_paths, index=0)
+                gdf_rec = load_gpkg(repo, rec_sel, branch)
+                layers_rec = [render_geojson_layer(make_geojson(gdf_rec), name="recorte")]
+                st.markdown("#### Mapa — Recorte selecionado")
+                deck(layers_rec, satellite=basemap.startswith("Satélite")) if basemap.startswith("Satélite") else osm_basemap_deck(layers_rec)
+        else:
+            rec_sel = st.selectbox("Arquivo de recorte", [f["path"] for f in recorte_files], index=0)
+            gdf_rec = load_gpkg(repo, rec_sel, branch)
+            layers_rec = [render_geojson_layer(make_geojson(gdf_rec), name="recorte")]
+            st.markdown("#### Mapa — Recorte selecionado")
+            deck(layers_rec, satellite=basemap.startswith("Satélite")) if basemap.startswith("Satélite") else osm_basemap_deck(layers_rec)
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
+
 
 # -----------------------------------------------------------------------------
 # ABA 2 — Clusterização
 # -----------------------------------------------------------------------------
 with tab2:
-    st.subheader("Mapa — EstagioClusterizacao (Data/dados/Originais)")
+    st.subheader("Mapa — EstagioClusterizacao")
+    # Detecta diretório de dados Originais (variações)
+    base_ori = pick_existing_dir(
+        repo, branch,
+        ["Data/dados/Originais", "Data/dados/originais", "Data/Dados/Originais"]
+    )
     try:
-        files_estagio = list_files(repo, "Data/dados/Originais", branch, (".parquet",))
+        files_estagio = list_files(repo, base_ori, branch, (".parquet",))
         estagio_candidates = [f for f in files_estagio if "estagioclusterizacao" in f["name"].lower() or f["name"].lower().startswith("estagio")]
         if not estagio_candidates and files_estagio:
-            estagio_candidates = [files_estagio[0]]
+            estagio_candidates = files_estagio
         if not estagio_candidates:
-            st.error("Não encontrei parquet com EstagioClusterizacao em Data/dados/Originais.")
+            st.error(f"Não encontrei parquet com EstagioClusterizacao em {base_ori}.")
             st.stop()
         sel_estagio = st.selectbox("Arquivo EstagioClusterizacao", [f["name"] for f in estagio_candidates])
         est_file = next(x for x in estagio_candidates if x["name"] == sel_estagio)
@@ -587,27 +266,10 @@ with tab2:
     if year:
         df_est = df_est[df_est["Ano"] == year]
 
-    if "gdf_quadras_cached" in st.session_state:
-        gdf_quadras = st.session_state["gdf_quadras_cached"]
-    else:
-        # tenta caminho padrão; se falhar, usa a busca por toda a árvore (mesmo código da Aba 1)
-        quadras_path_default = "Data/mapa/quadras.gpkg"
-        gdf_quadras = None
-        first_err = None
-        try:
-            gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
-        except Exception as e:
-            first_err = e
-        if gdf_quadras is None:
-            all_paths = github_tree_paths(repo, branch)
-            candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
-            candidates = sorted(candidates, key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p)))
-            if not candidates:
-                st.error(f"Não encontrei 'quadras.gpkg'. Erro original: {first_err}")
-                st.stop()
-            sel_quadras = st.selectbox("Selecione o arquivo de quadras (.gpkg):", candidates, index=0, key="quadras_tab2")
-            gdf_quadras = load_gpkg(repo, sel_quadras, branch)
-        st.session_state["gdf_quadras_cached"] = gdf_quadras
+    gdf_quadras = st.session_state.get("gdf_quadras_cached")
+    if gdf_quadras is None:
+        st.warning("As quadras ainda não foram carregadas (abra a aba 'Principal').")
+        st.stop()
 
     join_col_est = "SQ" if "SQ" in df_est.columns else None
     join_col_quad = "SQ" if "SQ" in gdf_quadras.columns else None
@@ -629,7 +291,11 @@ with tab2:
 
     gdfc["value"] = gdfc[cluster_col]
     gj = make_geojson(gdfc)
-    gj = attach_fill_color(gj, cmap, prop="value")
+    # cores
+    for feat in gj.get("features", []):
+        val = feat.get("properties", {}).get("value", None)
+        hexc = cmap.get(val, "#999999")
+        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
     colA, colB = st.columns([1,1], gap="large")
     with colA:
@@ -645,11 +311,18 @@ with tab2:
 
     st.subheader("Métricas por cluster/ano")
     opt_vers = st.radio("Versão dos dados", ["originais", "winsorizados"], index=0, horizontal=True)
-    base_metrics = "Data/analises/original" if opt_vers=="originais" else "Data/analises/winsorizados"
+    base_metrics = pick_existing_dir(
+        repo, branch,
+        ["Data/analises/original", "Data/analises/Original", "Data/Analises/original"]
+        if opt_vers == "originais" else
+        ["Data/analises/winsorizados", "Data/analises/Winsorizados"]
+    )
+
     try:
         files_metrics_csv = list_files(repo, base_metrics, branch, (".csv",))
         files_metrics_parq = list_files(repo, base_metrics, branch, (".parquet",))
-        main_candidates = [f for f in files_metrics_parq+files_metrics_csv if "metrica" in f["name"].lower() or "metrics" in f["name"].lower()]
+        main_candidates = [f for f in (files_metrics_parq + files_metrics_csv)
+                           if "metrica" in f["name"].lower() or "metrics" in f["name"].lower()]
         files_all = main_candidates if main_candidates else (files_metrics_parq + files_metrics_csv)
         if not files_all:
             st.info(f"Sem arquivos de métricas em {base_metrics}.")
@@ -677,11 +350,18 @@ with tab2:
         st.warning(f"Falha ao ler métricas: {e}")
 
     st.subheader("Associações (Spearman) e Testes t par-a-par")
+    # tenta descobrir automaticamente o arquivo de spearman
     try:
-        spearman_file = "Data/analises/original/analise_clusters__spearman_pairs__20250820-180622.csv"
-        df_spear = load_csv(repo, spearman_file, branch)
-        st.markdown("**Spearman pairs (arquivo original)**")
-        st.dataframe(df_spear, use_container_width=True)
+        spearman_dir = pick_existing_dir(repo, branch, ["Data/analises/original", "Data/analises/Original"])
+        spearman_candidates = [f for f in list_files(repo, spearman_dir, branch, (".csv",))
+                               if "spearman_pairs" in f["name"].lower()]
+        if spearman_candidates:
+            sel_sp = st.selectbox("Arquivo Spearman (original)", [f["name"] for f in spearman_candidates])
+            sp_obj = next(x for x in spearman_candidates if x["name"] == sel_sp)
+            df_spear = load_csv(repo, sp_obj["path"], branch)
+            st.dataframe(df_spear, use_container_width=True)
+        else:
+            st.info("Nenhum arquivo 'spearman_pairs' encontrado.")
     except Exception as e:
         st.info(f"Spearman pairs não encontrado ou erro ao ler: {e}")
 
@@ -689,8 +369,12 @@ with tab2:
     try:
         st.caption("Selecione um `.parquet` (originais/winsorize) e uma variável numérica; junta com clusters e calcula t-test entre pares.")
         src_type = st.radio("Origem", ["originais", "winsorize"], horizontal=True, index=0, key="tt_src")
-        var_base = f"Data/dados/{src_type}"
-        files_vars = list_files(repo, var_base, branch, (".parquet",))
+        var_dir = pick_existing_dir(
+            repo, branch,
+            [f"Data/dados/{src_type}",
+             f"Data/dados/{'Originais' if src_type=='originais' else 'winsorizados'}"]
+        )
+        files_vars = list_files(repo, var_dir, branch, (".parquet",))
         if files_vars:
             sel_vf = st.selectbox("Arquivo com variáveis", [f["name"] for f in files_vars], key="tt_file")
             vf_obj = next(x for x in files_vars if x["name"] == sel_vf)
@@ -706,9 +390,10 @@ with tab2:
             else:
                 st.info("Nenhuma variável numérica encontrada no arquivo selecionado.")
         else:
-            st.info(f"Sem arquivos em {var_base}.")
+            st.info(f"Sem arquivos em {var_dir}.")
     except Exception as e:
         st.warning(f"Erro nos testes t: {e}")
+
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas
@@ -716,13 +401,18 @@ with tab2:
 with tab3:
     st.subheader("Seleção de dataset")
     src_type = st.radio("Origem", ["originais", "winsorizados"], index=0, horizontal=True, key="uni_src")
-    base = f"Data/dados/{src_type}"
+    base_dir = pick_existing_dir(
+        repo, branch,
+        [f"Data/dados/{src_type}",
+         f"Data/dados/{'Originais' if src_type=='originais' else 'Winsorizados'}",
+         f"Data/dados/{'originais' if src_type=='originais' else 'winsorize'}"]
+    )
 
-    files_pq = list_files(repo, base, branch, (".parquet",))
-    files_csv = list_files(repo, base, branch, (".csv",))
+    files_pq = list_files(repo, base_dir, branch, (".parquet",))
+    files_csv = list_files(repo, base_dir, branch, (".csv",))
     files_all = files_pq + files_csv
     if not files_all:
-        st.error(f"Sem arquivos em {base}.")
+        st.error(f"Sem arquivos em {base_dir}.")
         st.stop()
 
     sel_file = st.selectbox("Arquivo de dados", [f["name"] for f in files_all])
@@ -792,7 +482,7 @@ with tab3:
 # -----------------------------------------------------------------------------
 with tab4:
     st.subheader("Variância explicada (PCA)")
-    base = "Data/analises/PCA"
+    base = pick_existing_dir(repo, branch, ["Data/analises/PCA", "Data/Analises/PCA"])
     files_pq = list_files(repo, base, branch, (".parquet",))
     files_csv = list_files(repo, base, branch, (".csv",))
     files_all = files_pq + files_csv
@@ -803,18 +493,19 @@ with tab4:
     st.caption("Selecione um arquivo PCA com colunas como `component` e `explained_variance_ratio` (ou similares).")
     sel = st.selectbox("Arquivo PCA", [f["name"] for f in files_all])
     fobj = next(x for x in files_all if x["name"] == sel)
-    df = load_parquet(repo, fobj["path"], branch) if fobj["name"].endswith(".parquet") else load_csv(repo, fobj["path"], branch)
+    dfpca = load_parquet(repo, fobj["path"], branch) if fobj["name"].endswith(".parquet") else load_csv(repo, fobj["path"], branch)
 
-    comp_col = next((c for c in df.columns if c.lower().startswith("comp")), df.columns[0])
-    evr_col = next((c for c in df.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
+    # tenta achar colunas
+    comp_col = next((c for c in dfpca.columns if c.lower().startswith("comp")), dfpca.columns[0])
+    evr_col = next((c for c in dfpca.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
     if evr_col is None:
-        evr_col = next((c for c in df.columns if "variance" in c.lower() and "ratio" in c.lower()), None)
+        evr_col = next((c for c in dfpca.columns if "variance" in c.lower() and "ratio" in c.lower()), None)
     if evr_col is None:
         st.error("Não encontrei coluna com 'explained_variance_ratio'.")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(dfpca.head(), use_container_width=True)
         st.stop()
 
-    dfp = df[[comp_col, evr_col]].dropna().copy()
+    dfp = dfpca[[comp_col, evr_col]].dropna().copy()
     dfp.columns = ["component","explained_variance_ratio"]
     try:
         dfp = dfp.sort_values("component")
@@ -834,7 +525,313 @@ with tab4:
     st.dataframe(dfp, use_container_width=True)
 
 
+API_BASE = "https://api.github.com"
+RAW_BASE = "https://raw.githubusercontent.com"
+
+def _secret(path, default=None):
+    cur = st.secrets
+    try:
+        for p in path:
+            cur = cur[p]
+        return cur
+    except Exception:
+        return default
+
+def _gh_headers():
+    token = _secret(["github","token"], None)
+    h = {"Accept": "application/vnd.github+json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+def normalize_repo(owner_repo: str) -> str:
+    s = (owner_repo or "").strip()
+    s = s.replace("https://github.com/", "").replace("http://github.com/", "")
+    s = s.strip("/")
+    parts = [p for p in s.split("/") if p]
+    if len(parts) < 2:
+        raise RuntimeError("Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechCluster'")
+    return f"{parts[0]}/{parts[1]}"
+
+@st.cache_data(show_spinner=True)
+def github_repo_info(owner_repo: str) -> dict:
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
+    return r.json()
+
+def resolve_branch(owner_repo: str, user_branch: str) -> str:
+    owner_repo = normalize_repo(owner_repo)
+    b = (user_branch or "").strip()
+    if b:
+        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
+        r = requests.get(url, headers=_gh_headers(), timeout=60)
+        if r.status_code == 200:
+            return b
+    info = github_repo_info(owner_repo)
+    return info.get("default_branch", "main")
+
+def build_raw_url(owner_repo: str, path: str, branch: str) -> str:
+    owner_repo = normalize_repo(owner_repo).strip("/")
+    path = path.lstrip("/")
+    return f"{RAW_BASE}/{owner_repo}/{branch}/{path}"
+
+@st.cache_data(show_spinner=False)
+def github_listdir(owner_repo: str, path: str, branch: str):
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        # não explode: devolve lista vazia (ajuda nos fallbacks)
+        return []
+    return r.json()
+
+@st.cache_data(show_spinner=True)
+def github_get_contents(owner_repo: str, path: str, branch: str) -> dict:
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
+    return r.json()
+
+@st.cache_data(show_spinner=True)
+def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
+    """Baixa binário via Contents API (funciona com LFS/privado)."""
+    meta = github_get_contents(owner_repo, path, branch)
+    download_url = meta.get("download_url") or build_raw_url(owner_repo, path, branch)
+    r = requests.get(download_url, headers=_gh_headers(), timeout=180)
+    if r.status_code != 200:
+        ct = r.headers.get("Content-Type", "")
+        raise RuntimeError(f"Download falhou ({r.status_code}, Content-Type={ct}). Verifique token/privacidade.")
+    data = r.content
+    # ponteiro LFS?
+    if data.startswith(b"version https://git-lfs.github.com/spec"):
+        raise RuntimeError("Recebi um ponteiro Git LFS em vez do binário. Use token em st.secrets['github']['token'].")
+    head = data[:200].strip().lower()
+    if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+        raise RuntimeError("Recebi HTML em vez do arquivo binário. Provável rate limit/privado. Defina token.")
+    return data
+
+@st.cache_data(show_spinner=True)
+def load_gpkg(owner_repo: str, path: str, branch: str, layer: str | None = None):
+    try:
+        import geopandas as gpd  # type: ignore
+    except Exception as e:
+        raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
+    blob = github_fetch_bytes(owner_repo, path, branch)
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+        tmp.write(blob)
+        tmp.flush()
+        tmp_path = tmp.name
+    try:
+        return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")  # type: ignore
+    except Exception:
+        return gpd.read_file(tmp_path, layer=layer)  # type: ignore
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+@st.cache_data(show_spinner=True)
+def load_parquet(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
+    blob = github_fetch_bytes(owner_repo, path, branch)
+    import io as _io
+    return pd.read_parquet(_io.BytesIO(blob), engine="pyarrow")
+
+@st.cache_data(show_spinner=True)
+def load_csv(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
+    blob = github_fetch_bytes(owner_repo, path, branch)
+    return pd.read_csv(io.BytesIO(blob))
+
+def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
+    items = github_listdir(owner_repo, path, branch)
+    out = []
+    for it in items:
+        if isinstance(it, dict) and it.get("type") == "file":
+            nm = it["name"]
+            if any(nm.lower().endswith(e) for e in exts):
+                out.append({"path": f"{path.rstrip('/')}/{nm}", "name": nm})
+    return out
+
+@st.cache_data(show_spinner=True)
+def github_branch_info(owner_repo: str, branch: str) -> dict:
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}/branches/{branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text}")
+    return r.json()
+
+@st.cache_data(show_spinner=True)
+def github_tree_paths(owner_repo: str, branch: str) -> list[str]:
+    """Lista todos os blobs do repo/branch (recursivo)."""
+    info = github_branch_info(owner_repo, branch)
+    tree_sha = info["commit"]["commit"]["tree"]["sha"]
+    url = f"{API_BASE}/repos/{normalize_repo(owner_repo)}/git/trees/{tree_sha}?recursive=1"
+    r = requests.get(url, headers=_gh_headers(), timeout=180)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
+    tree = r.json().get("tree", [])
+    return [ent["path"] for ent in tree if ent.get("type") == "blob"]
+
+def pick_existing_dir(owner_repo: str, branch: str, candidates: list[str]) -> str:
+    """Retorna o primeiro diretório existente (case-insensitive helper)."""
+    for cand in candidates:
+        items = github_listdir(owner_repo, cand, branch)
+        if items:  # existe e tem algo
+            return cand
+    # último recurso: tenta achar um candidato por substrings
+    all_paths = github_tree_paths(owner_repo, branch)
+    for cand in candidates:
+        key = cand.strip("/").lower()
+        for p in all_paths:
+            if p.lower().startswith(key):
+                # retorna só o prefixo de diretório do primeiro arquivo achado
+                return "/".join(p.split("/")[:len(key.split("/"))])
+    # se nada, devolve o primeiro (vai falhar adiante e o app avisa)
+    return candidates[0]
+
+def hex_to_rgba(hex_color: str):
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
+    return [r, g, b, 180]
+
+# paletas quentes (evita verde/azul)
+SEQUENTIAL = {
+    4: ['#fee8d8','#fdbb84','#fc8d59','#d7301f'],
+    5: ['#feedde','#fdbe85','#fd8d3c','#e6550d','#a63603'],
+    6: ['#feedde','#fdd0a2','#fdae6b','#fd8d3c','#e6550d','#a63603'],
+    7: ['#fff5eb','#fee6ce','#fdd0a2','#fdae6b','#fd8d3c','#e6550d','#a63603'],
+    8: ['#fff5f0','#fee0d2','#fcbba1','#fc9272','#fb6a4a','#ef3b2c','#cb181d','#99000d'],
+}
+
+CATEGORICAL = [
+    '#7c3aed','#d946ef','#fb7185','#f97316','#f59e0b','#facc15','#fde047',
+    '#a16207','#9a3412','#b91c1c','#ea580c','#be185d','#9333ea','#6b21a8',
+    '#a21caf','#c026d3','#db2777','#e11d48','#eab308','#f43f5e'
+]
+
+def pick_sequential(n: int):
+    n = max(4, min(8, n))
+    return SEQUENTIAL.get(n, SEQUENTIAL[6])
+
+def pick_categorical(k: int):
+    if k <= len(CATEGORICAL):
+        return CATEGORICAL[:k]
+    reps = (k // len(CATEGORICAL)) + 1
+    return (CATEGORICAL * reps)[:k]
+
+def is_categorical(series: pd.Series) -> bool:
+    if series.dtype.kind in ("O","b","M","m","U","S"):
+        return True
+    return series.dropna().nunique() <= 12
+
+def jenks_breaks(values: pd.Series, k: int):
+    import mapclassify as mc
+    vals = values.dropna().astype(float).values
+    uniq = np.unique(vals)
+    if len(uniq) < max(4, k):
+        k = min(len(uniq), max(2, k))
+    nb = mc.NaturalBreaks(vals, k=k, initial=200)
+    bins = [-float("inf")] + list(nb.bins)
+    binned = pd.cut(values, bins=bins, labels=False, include_lowest=True)
+    return bins, binned
 
 
+def ensure_wgs84(gdf):
+    try:
+        if hasattr(gdf, "crs") and gdf.crs and str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
+            return gdf.to_crs(4326)
+    except Exception:
+        pass
+    return gdf
 
+def make_geojson(gdf) -> dict:
+    gdf = ensure_wgs84(gdf)
+    return json.loads(gdf.to_json())
 
+def render_geojson_layer(geojson_obj: dict, name: str = "Polygons") -> pdk.Layer:
+    return pdk.Layer(
+        "GeoJsonLayer",
+        geojson_obj,
+        pickable=True,
+        stroked=False,
+        filled=True,
+        extruded=False,
+        get_fill_color="properties.fill_color",
+        get_line_color=[100,100,100],
+        get_line_width=0.5,
+        auto_highlight=True
+    )
+
+def render_line_layer(geojson_obj: dict, name: str = "Lines") -> pdk.Layer:
+    return pdk.Layer(
+        "GeoJsonLayer",
+        geojson_obj,
+        pickable=True,
+        stroked=True,
+        filled=False,
+        get_line_color=[30,30,30],
+        get_line_width=2
+    )
+
+def render_point_layer(geojson_obj: dict, name: str = "Points") -> pdk.Layer:
+    return pdk.Layer(
+        "GeoJsonLayer",
+        geojson_obj,
+        pickable=True,
+        point_type="circle",
+        get_fill_color=[60,60,60,220],
+        get_radius=60,
+    )
+
+def deck(layers, satellite=False, initial_view_state=None):
+    token = st.secrets.get("mapbox", {}).get("token", None)
+    map_style = "mapbox://styles/mapbox/light-v11"
+    if satellite:
+        map_style = "mapbox://styles/mapbox/satellite-streets-v12"
+    r = pdk.Deck(
+        layers=layers,
+        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
+        map_style=map_style,
+        api_keys={"mapbox": token} if token else None,
+        tooltip={"text": "{name}\n{value}"}
+    )
+    st.pydeck_chart(r, use_container_width=True)
+
+def osm_basemap_deck(layers, initial_view_state=None):
+    tile = pdk.Layer(
+        "TileLayer",
+        data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    )
+    r = pdk.Deck(
+        layers=[tile] + layers,
+        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
+        map_style=None,
+    )
+    st.pydeck_chart(r, use_container_width=True)
+
+def pairwise_ttests(df: pd.DataFrame, group_col: str, value_col: str, equal_var: bool = False) -> pd.DataFrame:
+    groups = [g for g in df[group_col].dropna().unique()]
+    rows = []
+    for a,b in itertools.combinations(groups, 2):
+        x = df.loc[df[group_col]==a, value_col].dropna().astype(float)
+        y = df.loc[df[group_col]==b, value_col].dropna().astype(float)
+        if len(x) >= 2 and len(y) >= 2:
+            t, p = stats.ttest_ind(x, y, equal_var=equal_var, nan_policy='omit')
+            rows.append({"grupo_a": a, "grupo_b": b, "t": float(t), "p_value": float(p)})
+    return pd.DataFrame(rows)
+
+def chi2_between(df: pd.DataFrame, col_a: str, col_b: str):
+    tbl = pd.crosstab(df[col_a], df[col_b])
+    chi2, p, dof, expected = stats.chi2_contingency(tbl, correction=False)
+    return {"chi2": float(chi2), "p_value": float(p), "dof": int(dof), "table": tbl}
+
+def corr_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
+    num = df.select_dtypes(include=[np.number])
+    return num.corr(method=method).replace([np.inf, -np.inf], np.nan)
