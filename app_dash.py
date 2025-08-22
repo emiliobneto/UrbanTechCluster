@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# APP PRINCIPAL — abas 1, 2, 3 e chamada da aba 4 (PCA)
 import io
 import json
 import os
@@ -10,9 +12,9 @@ import pydeck as pdk
 import streamlit as st
 from scipy import stats
 
-# =============================================================================
-# CONFIG
-# =============================================================================
+# ==========================
+# CONFIG GERAL
+# ==========================
 st.set_page_config(
     page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
     page_icon="🧠",
@@ -21,9 +23,9 @@ st.set_page_config(
 TITLE = "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
 st.title(TITLE)
 
-# =============================================================================
-# GITHUB I/O HELPERS (monolítico)
-# =============================================================================
+# ==========================
+# GITHUB I/O HELPERS
+# ==========================
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
@@ -43,7 +45,7 @@ def _gh_headers():
         h["Authorization"] = f"Bearer {token}"
     return h
 
-def normalize_repo(owner_repo: str) -> str:
+def normalize_repo(owner_repo):
     s = (owner_repo or "").strip()
     s = s.replace("https://github.com/", "").replace("http://github.com/", "")
     s = s.strip("/")
@@ -53,7 +55,7 @@ def normalize_repo(owner_repo: str) -> str:
     return f"{parts[0]}/{parts[1]}"
 
 @st.cache_data(show_spinner=True)
-def github_repo_info(owner_repo: str) -> dict:
+def github_repo_info(owner_repo):
     owner_repo = normalize_repo(owner_repo)
     url = f"{API_BASE}/repos/{owner_repo}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
@@ -61,7 +63,7 @@ def github_repo_info(owner_repo: str) -> dict:
         raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
     return r.json()
 
-def resolve_branch(owner_repo: str, user_branch: str) -> str:
+def resolve_branch(owner_repo, user_branch):
     owner_repo = normalize_repo(owner_repo)
     b = (user_branch or "").strip()
     if b:
@@ -72,22 +74,22 @@ def resolve_branch(owner_repo: str, user_branch: str) -> str:
     info = github_repo_info(owner_repo)
     return info.get("default_branch", "main")
 
-def build_raw_url(owner_repo: str, path: str, branch: str) -> str:
+def build_raw_url(owner_repo, path, branch):
     owner_repo = normalize_repo(owner_repo).strip("/")
     path = path.lstrip("/")
     return f"{RAW_BASE}/{owner_repo}/{branch}/{path}"
 
 @st.cache_data(show_spinner=False)
-def github_listdir(owner_repo: str, path: str, branch: str):
+def github_listdir(owner_repo, path, branch):
     owner_repo = normalize_repo(owner_repo)
     url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
-        return []  # devolve vazio para permitir fallbacks
+        return []
     return r.json()
 
 @st.cache_data(show_spinner=True)
-def github_get_contents(owner_repo: str, path: str, branch: str) -> dict:
+def github_get_contents(owner_repo, path, branch):
     owner_repo = normalize_repo(owner_repo)
     url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
@@ -96,8 +98,7 @@ def github_get_contents(owner_repo: str, path: str, branch: str) -> dict:
     return r.json()
 
 @st.cache_data(show_spinner=True)
-def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
-    """Baixa binário via Contents API (funciona com LFS/privado)."""
+def github_fetch_bytes(owner_repo, path, branch):
     meta = github_get_contents(owner_repo, path, branch)
     download_url = meta.get("download_url") or build_raw_url(owner_repo, path, branch)
     r = requests.get(download_url, headers=_gh_headers(), timeout=180)
@@ -105,47 +106,43 @@ def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
         ct = r.headers.get("Content-Type", "")
         raise RuntimeError(f"Download falhou ({r.status_code}, Content-Type={ct}). Verifique token/privacidade.")
     data = r.content
-    # ponteiro LFS?
     if data.startswith(b"version https://git-lfs.github.com/spec"):
-        raise RuntimeError("Recebi um ponteiro Git LFS em vez do binário. Use token em st.secrets['github']['token'].")
+        raise RuntimeError("Arquivo está em LFS (ponteiro). Defina token em st.secrets['github']['token'].")
     head = data[:200].strip().lower()
     if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
-        raise RuntimeError("Recebi HTML em vez do arquivo binário. Provável rate limit/privado. Defina token.")
+        raise RuntimeError("Recebi HTML em vez do arquivo. Provável rate limit/privado. Defina token.")
     return data
 
 @st.cache_data(show_spinner=True)
-def load_gpkg(owner_repo: str, path: str, branch: str, layer: str | None = None):
+def load_gpkg(owner_repo, path, branch, layer=None):
     try:
-        import geopandas as gpd  # type: ignore
+        import geopandas as gpd
     except Exception as e:
         raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
     blob = github_fetch_bytes(owner_repo, path, branch)
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
-        tmp.write(blob)
-        tmp.flush()
+        tmp.write(blob); tmp.flush()
         tmp_path = tmp.name
     try:
-        # tenta engine pyogrio (mais estável)
-        return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")  # type: ignore
+        return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")
     except Exception:
-        # fallback p/ engine padrão (Fiona)
-        return gpd.read_file(tmp_path, layer=layer)  # type: ignore
+        return gpd.read_file(tmp_path, layer=layer)
     finally:
         try: os.unlink(tmp_path)
         except Exception: pass
 
 @st.cache_data(show_spinner=True)
-def load_parquet(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
+def load_parquet(owner_repo, path, branch):
     blob = github_fetch_bytes(owner_repo, path, branch)
     return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
 
 @st.cache_data(show_spinner=True)
-def load_csv(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
+def load_csv(owner_repo, path, branch):
     blob = github_fetch_bytes(owner_repo, path, branch)
     return pd.read_csv(io.BytesIO(blob))
 
-def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
+def list_files(owner_repo, path, branch, exts=(".parquet", ".csv", ".gpkg")):
     items = github_listdir(owner_repo, path, branch)
     out = []
     for it in items:
@@ -156,7 +153,7 @@ def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv"
     return out
 
 @st.cache_data(show_spinner=True)
-def github_branch_info(owner_repo: str, branch: str) -> dict:
+def github_branch_info(owner_repo, branch):
     owner_repo = normalize_repo(owner_repo)
     url = f"{API_BASE}/repos/{owner_repo}/branches/{branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
@@ -165,8 +162,7 @@ def github_branch_info(owner_repo: str, branch: str) -> dict:
     return r.json()
 
 @st.cache_data(show_spinner=True)
-def github_tree_paths(owner_repo: str, branch: str) -> list[str]:
-    """Lista todos os blobs do repo/branch (recursivo)."""
+def github_tree_paths(owner_repo, branch):
     info = github_branch_info(owner_repo, branch)
     tree_sha = info["commit"]["commit"]["tree"]["sha"]
     url = f"{API_BASE}/repos/{normalize_repo(owner_repo)}/git/trees/{tree_sha}?recursive=1"
@@ -176,26 +172,23 @@ def github_tree_paths(owner_repo: str, branch: str) -> list[str]:
     tree = r.json().get("tree", [])
     return [ent["path"] for ent in tree if ent.get("type") == "blob"]
 
-def pick_existing_dir(owner_repo: str, branch: str, candidates: list[str]) -> str:
-    """Retorna o primeiro diretório existente (case-insensitive helper)."""
+def pick_existing_dir(owner_repo, branch, candidates):
     for cand in candidates:
         items = github_listdir(owner_repo, cand, branch)
-        if items:  # existe e tem algo
+        if items:
             return cand
-    # último recurso: tenta achar um candidato por substrings
     all_paths = github_tree_paths(owner_repo, branch)
     for cand in candidates:
         key = cand.strip("/").lower()
         for p in all_paths:
             if p.lower().startswith(key):
-                # retorna só o prefixo de diretório do primeiro arquivo achado
                 return "/".join(p.split("/")[:len(key.split("/"))])
     return candidates[0]
 
-# =============================================================================
-# COLOR/CLASSIFY/MAPS/STATS HELPERS (monolítico)
-# =============================================================================
-def hex_to_rgba(hex_color: str):
+# ==========================
+# CORES / CLASSIF / MAPAS / TESTES
+# ==========================
+def hex_to_rgba(hex_color):
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
     return [r, g, b, 180]
@@ -212,21 +205,19 @@ CATEGORICAL = [
     '#a16207','#9a3412','#b91c1c','#ea580c','#be185d','#9333ea','#6b21a8',
     '#a21caf','#c026d3','#db2777','#e11d48','#eab308','#f43f5e'
 ]
-def pick_sequential(n: int):
+def pick_sequential(n):
     n = max(4, min(8, n))
     return SEQUENTIAL.get(n, SEQUENTIAL[6])
-def pick_categorical(k: int):
-    if k <= len(CATEGORICAL):
-        return CATEGORICAL[:k]
+def pick_categorical(k):
+    if k <= len(CATEGORICAL): return CATEGORICAL[:k]
     reps = (k // len(CATEGORICAL)) + 1
     return (CATEGORICAL * reps)[:k]
 
-def is_categorical(series: pd.Series) -> bool:
-    if series.dtype.kind in ("O","b","M","m","U","S"):
-        return True
+def is_categorical(series):
+    if series.dtype.kind in ("O","b","M","m","U","S"): return True
     return series.dropna().nunique() <= 12
 
-def jenks_breaks(values: pd.Series, k: int):
+def jenks_breaks(values, k):
     import mapclassify as mc
     vals = values.dropna().astype(float).values
     uniq = np.unique(vals)
@@ -245,11 +236,11 @@ def ensure_wgs84(gdf):
         pass
     return gdf
 
-def make_geojson(gdf) -> dict:
+def make_geojson(gdf):
     gdf = ensure_wgs84(gdf)
     return json.loads(gdf.to_json())
 
-def render_geojson_layer(geojson_obj: dict, name: str = "Polygons") -> pdk.Layer:
+def render_geojson_layer(geojson_obj, name="Polygons"):
     return pdk.Layer(
         "GeoJsonLayer",
         geojson_obj,
@@ -263,7 +254,7 @@ def render_geojson_layer(geojson_obj: dict, name: str = "Polygons") -> pdk.Layer
         auto_highlight=True
     )
 
-def render_line_layer(geojson_obj: dict, name: str = "Lines") -> pdk.Layer:
+def render_line_layer(geojson_obj, name="Lines"):
     return pdk.Layer(
         "GeoJsonLayer",
         geojson_obj,
@@ -274,7 +265,7 @@ def render_line_layer(geojson_obj: dict, name: str = "Lines") -> pdk.Layer:
         get_line_width=2
     )
 
-def render_point_layer(geojson_obj: dict, name: str = "Points") -> pdk.Layer:
+def render_point_layer(geojson_obj, name="Points"):
     return pdk.Layer(
         "GeoJsonLayer",
         geojson_obj,
@@ -299,10 +290,7 @@ def deck(layers, satellite=False, initial_view_state=None):
     st.pydeck_chart(r, use_container_width=True)
 
 def osm_basemap_deck(layers, initial_view_state=None):
-    tile = pdk.Layer(
-        "TileLayer",
-        data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    )
+    tile = pdk.Layer("TileLayer", data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
     r = pdk.Deck(
         layers=[tile] + layers,
         initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
@@ -310,7 +298,47 @@ def osm_basemap_deck(layers, initial_view_state=None):
     )
     st.pydeck_chart(r, use_container_width=True)
 
-def pairwise_ttests(df: pd.DataFrame, group_col: str, value_col: str, equal_var: bool = False) -> pd.DataFrame:
+# ---------- LEGENDS ----------
+def _legend_row(hex_color, label):
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;gap:8px;margin:4px 0;">
+           <div style="width:14px;height:14px;border-radius:3px;border:1px solid #00000022;background:{hex_color};"></div>
+           <div style="font-size:0.9rem;">{label}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_legend_categorical(cmap, title="Legenda"):
+    st.markdown(f"**{title}**")
+    for k in sorted(cmap.keys(), key=lambda x: str(x)):
+        _legend_row(cmap[k], str(k))
+
+def _fmt_num(x):
+    try:
+        if x == -float("inf"): return "-∞"
+        if x == float("inf"): return "+∞"
+        return f"{float(x):.3g}"
+    except Exception:
+        return str(x)
+
+def render_legend_numeric(bins, palette, title="Legenda"):
+    st.markdown(f"**{title}**")
+    k = len(palette)
+    for i in range(k):
+        left = bins[i]
+        right = bins[i+1] if i+1 < len(bins) else float("inf")
+        if left == -float("inf"):
+            label = f"≤ {_fmt_num(right)}"
+        elif right == float("inf"):
+            label = f"> {_fmt_num(left)}"
+        else:
+            label = f"({_fmt_num(left)} – {_fmt_num(right)}]"
+        _legend_row(palette[i], label)
+
+# ---------- TESTES ----------
+def pairwise_ttests(df, group_col, value_col, equal_var=False):
     groups = [g for g in df[group_col].dropna().unique()]
     rows = []
     for a,b in itertools.combinations(groups, 2):
@@ -321,23 +349,22 @@ def pairwise_ttests(df: pd.DataFrame, group_col: str, value_col: str, equal_var:
             rows.append({"grupo_a": a, "grupo_b": b, "t": float(t), "p_value": float(p)})
     return pd.DataFrame(rows)
 
-def chi2_between(df: pd.DataFrame, col_a: str, col_b: str):
+def chi2_between(df, col_a, col_b):
     tbl = pd.crosstab(df[col_a], df[col_b])
     chi2, p, dof, expected = stats.chi2_contingency(tbl, correction=False)
     return {"chi2": float(chi2), "p_value": float(p), "dof": int(dof), "table": tbl}
 
-def corr_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
+def corr_matrix(df, method="pearson"):
     num = df.select_dtypes(include=[np.number])
     return num.corr(method=method).replace([np.inf, -np.inf], np.nan)
 
-# =============================================================================
+# ==========================
 # SIDEBAR
-# =============================================================================
+# ==========================
 with st.sidebar:
     st.header("🔗 Fonte dos Dados (GitHub)")
     repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster")
     branch_input = st.text_input("branch (vazio = auto)", value="")
-
     try:
         repo = normalize_repo(repo_input)
         branch = resolve_branch(repo, branch_input)
@@ -345,7 +372,6 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Configuração inválida: {e}")
         st.stop()
-
     st.divider()
     st.header("🗺️ Mapbox (opcional)")
     st.caption("Defina `mapbox.token` em secrets para habilitar satélite.")
@@ -353,57 +379,45 @@ with st.sidebar:
 if not repo or not branch:
     st.stop()
 
-# =============================================================================
+# ==========================
 # TABS
-# =============================================================================
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"]
-)
+# ==========================
+from ml_pca_tab import render_pca_tab  # importa a aba 4
+
+tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"])
 
 # -----------------------------------------------------------------------------
-# ABA 1 — Principal
+# ABA 1 — Principal (mapa + dados por SQ + recortes)
 # -----------------------------------------------------------------------------
 with tab1:
     st.subheader("Quadras e camadas adicionais (GPKG)")
     colA, colB = st.columns([2,1], gap="large")
     with colA:
-        st.caption("Carrega `Data/mapa/quadras.gpkg` e sobrepõe camadas auxiliares (linhas/estações/água).")
+        st.caption("Carrega `Data/mapa/quadras.gpkg` e camadas auxiliares.")
     with colB:
         basemap = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0)
 
-    # --- Carregamento robusto das quadras (cache + fallback por Tree API)
+    # carregar quadras (com fallback)
     quadras_path_default = "Data/mapa/quadras.gpkg"
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
-
     if gdf_quadras is None:
         first_err = None
         try:
             gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
         except Exception as e:
             first_err = e
-            # Procura qualquer arquivo 'quadras.gpkg' no repo
             all_paths = github_tree_paths(repo, branch)
             candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
-            candidates = sorted(
-                candidates,
-                key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p))
-            )
+            candidates = sorted(candidates, key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p)))
             if not candidates:
-                st.error(
-                    f"Não encontrei 'quadras.gpkg' no repositório ({repo}@{branch}). "
-                    f"Erro ao tentar '{quadras_path_default}': {first_err}"
-                )
+                st.error(f"Não encontrei 'quadras.gpkg'. Erro ao tentar '{quadras_path_default}': {first_err}")
                 st.stop()
-            sel_quadras = st.selectbox(
-                "Selecione o arquivo de quadras (.gpkg) detectado no repositório:",
-                candidates, index=0, key="quadras_tab1"
-            )
+            sel_quadras = st.selectbox("Selecione o arquivo de quadras:", candidates, index=0, key="quadras_tab1")
             gdf_quadras = load_gpkg(repo, sel_quadras, branch)
             st.success(f"Carregado: {sel_quadras}")
-
         st.session_state["gdf_quadras_cached"] = gdf_quadras
 
-    # --- Camadas auxiliares (se existirem)
+    # camadas auxiliares
     try:
         mapa_dir = pick_existing_dir(repo, branch, ["Data/mapa", "data/mapa", "Data/Mapa"])
         mapa_files = list_files(repo, mapa_dir, branch, (".gpkg",))
@@ -419,18 +433,16 @@ with tab1:
         st.warning(f"Não foi possível listar/ler camadas em Data/mapa: {e}")
         loaded_layers = []
 
-    # -------- Dados por SQ
+    # dados por SQ
     st.subheader("Dados por `SQ` para espacialização")
     col1, col2, col3 = st.columns([1.6,1,1.2], gap="large")
-
     with col1:
         src_label = st.radio("Origem dos dados", ["originais", "winsorize"], index=0, horizontal=True)
         base_dir = pick_existing_dir(
             repo, branch,
             [f"Data/dados/{src_label}",
-             f"Data/Dados/{src_label}",
              f"Data/dados/{'Originais' if src_label=='originais' else 'winsorizados'}",
-             f"Data/dados/{'originais' if src_label=='originais' else 'winsorizados'}"]
+             f"Data/dados/{'originais' if src_label=='originais' else 'winsorize'}"]
         )
         parquet_files = list_files(repo, base_dir, branch, (".parquet",))
         if not parquet_files:
@@ -439,59 +451,55 @@ with tab1:
         sel_file = st.selectbox("Arquivo .parquet com variáveis", [f["name"] for f in parquet_files])
         fobj = next(x for x in parquet_files if x["name"] == sel_file)
         df_vars = load_parquet(repo, fobj["path"], branch)
-
     with col2:
         join_col = next((c for c in df_vars.columns if c.upper()=="SQ" or c=="SQ"), None)
         if join_col is None:
-            st.error("Dataset selecionado não possui coluna 'SQ'.")
-            st.stop()
+            st.error("Dataset selecionado não possui coluna 'SQ'."); st.stop()
         years = sorted([int(y) for y in df_vars["Ano"].dropna().unique()]) if "Ano" in df_vars.columns else []
         year = st.select_slider("Ano", options=years, value=years[-1]) if years else None
-        if year:
-            df_vars = df_vars[df_vars["Ano"]==year]
-
+        if year: df_vars = df_vars[df_vars["Ano"]==year]
     with col3:
         var_options = [c for c in df_vars.columns if c not in (join_col, "Ano")]
         if not var_options:
-            st.error("Nenhuma variável disponível além de SQ/Ano.")
-            st.stop()
+            st.error("Nenhuma variável disponível além de SQ/Ano."); st.stop()
         var_sel = st.selectbox("Variável a mapear", var_options)
         n_classes = st.slider("Quebras (Jenks)", min_value=4, max_value=8, value=6)
 
-    # join
+    # merge com quadras
     sq_col_quadras = "SQ" if "SQ" in gdf_quadras.columns else next((c for c in gdf_quadras.columns if c.upper()=="SQ"), None)
-    if not sq_col_quadras:
-        st.error("Camada de quadras não possui coluna 'SQ'.")
-        st.stop()
+    if not sq_col_quadras: st.error("Camada de quadras não possui coluna 'SQ'."); st.stop()
     gdf = gdf_quadras.merge(df_vars[[join_col, var_sel]], left_on=sq_col_quadras, right_on=join_col, how="left")
 
-    # cores
+    # classificação + legenda
+    legend_kind = None; legend_info = None
     series = gdf[var_sel]
     if is_categorical(series):
         cats = [c for c in series.dropna().unique()]
         palette = pick_categorical(len(cats))
-        cmap = {cat: palette[i] for i,cat in enumerate(cats)}
+        try: cats_sorted = sorted(cats, key=lambda x: float(x))
+        except Exception: cats_sorted = sorted(cats, key=lambda x: str(x))
+        cmap = {cat: palette[i] for i,cat in enumerate(cats_sorted)}
         gdf["value"] = series
+        legend_kind = "categorical"; legend_info = cmap
     else:
-        _, binned = jenks_breaks(series, k=n_classes)
+        bins, binned = jenks_breaks(series, k=n_classes)
         gdf["value"] = binned
         k = len(set(b for b in binned.dropna().unique())) or n_classes
         palette = pick_sequential(k)
         cmap = {i: palette[i] for i in range(len(palette))}
+        legend_kind = "numeric"; legend_info = (bins, palette)
 
     geojson = make_geojson(gdf)
     for feat in geojson.get("features", []):
         val = feat.get("properties", {}).get("value", None)
-        hexc = cmap.get(val, "#999999")
+        hexc = cmap.get(val, "#999999") if legend_kind=="numeric" else legend_info.get(val, "#999999")
         feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
     layers = [render_geojson_layer(geojson, name="quadras")]
     for nm, g in loaded_layers:
         gj = make_geojson(g)
-        try:
-            geoms = set(g.geometry.geom_type.unique())
-        except Exception:
-            geoms = {"Polygon"}
+        try: geoms = set(g.geometry.geom_type.unique())
+        except Exception: geoms = {"Polygon"}
         if geoms <= {"LineString","MultiLineString"}:
             layers.append(render_line_layer(gj, nm))
         elif geoms <= {"Point","MultiPoint"}:
@@ -500,19 +508,26 @@ with tab1:
             layers.append(render_geojson_layer(gj, nm))
 
     st.markdown("#### Mapa — Quadras + Camadas auxiliares")
-    if basemap.startswith("Satélite"):
-        deck(layers, satellite=True)
-    else:
-        osm_basemap_deck(layers)
+    map_col, legend_col = st.columns([4, 1], gap="large")
+    with map_col:
+        if basemap.startswith("Satélite"): deck(layers, satellite=True)
+        else: osm_basemap_deck(layers)
+    with legend_col:
+        if legend_kind == "categorical":
+            render_legend_categorical(legend_info, title=f"Legenda — {var_sel}")
+        elif legend_kind == "numeric":
+            bins, palette = legend_info
+            render_legend_numeric(bins, palette, title=f"Legenda — {var_sel}")
+        else:
+            st.caption("Sem legenda.")
 
-    # -------- Recortes
+    # Recortes
     st.subheader("Recortes espaciais (GPKG)")
     st.caption("Seleciona GPKGs em `Data/mapa/recortes` (com fallback por busca).")
     try:
         rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
         recorte_files = list_files(repo, rec_dir, branch, (".gpkg",))
         if not recorte_files:
-            # fallback por tree
             all_paths = github_tree_paths(repo, branch)
             rec_paths = [p for p in all_paths if p.lower().endswith(".gpkg") and "/recortes/" in p.lower()]
             if not rec_paths:
@@ -520,15 +535,23 @@ with tab1:
             else:
                 rec_sel = st.selectbox("Arquivo de recorte", rec_paths, index=0)
                 gdf_rec = load_gpkg(repo, rec_sel, branch)
-                layers_rec = [render_geojson_layer(make_geojson(gdf_rec), name="recorte")]
+                layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
                 st.markdown("#### Mapa — Recorte selecionado")
-                deck(layers_rec, satellite=basemap.startswith("Satélite")) if basemap.startswith("Satélite") else osm_basemap_deck(layers_rec)
+                col_m, col_l = st.columns([4,1], gap="large")
+                with col_m:
+                    deck(layers_rec, satellite=basemap.startswith("Satélite"))
+                with col_l:
+                    st.markdown("**Legenda — Recorte**"); _legend_row("#444444", "Contorno do recorte")
         else:
             rec_sel = st.selectbox("Arquivo de recorte", [f["path"] for f in recorte_files], index=0)
             gdf_rec = load_gpkg(repo, rec_sel, branch)
-            layers_rec = [render_geojson_layer(make_geojson(gdf_rec), name="recorte")]
+            layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
             st.markdown("#### Mapa — Recorte selecionado")
-            deck(layers_rec, satellite=basemap.startswith("Satélite")) if basemap.startswith("Satélite") else osm_basemap_deck(layers_rec)
+            col_m, col_l = st.columns([4,1], gap="large")
+            with col_m:
+                deck(layers_rec, satellite=basemap.startswith("Satélite"))
+            with col_l:
+                st.markdown("**Legenda — Recorte**"); _legend_row("#444444", "Contorno do recorte")
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
 
@@ -537,52 +560,41 @@ with tab1:
 # -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa — EstagioClusterizacao")
-    base_ori = pick_existing_dir(
-        repo, branch,
-        ["Data/dados/Originais", "Data/dados/originais", "Data/Dados/Originais"]
-    )
+    base_ori = pick_existing_dir(repo, branch, ["Data/dados/Originais", "Data/dados/originais", "Data/Dados/Originais"])
     try:
         files_estagio = list_files(repo, base_ori, branch, (".parquet",))
         estagio_candidates = [f for f in files_estagio if "estagioclusterizacao" in f["name"].lower() or f["name"].lower().startswith("estagio")]
-        if not estagio_candidates and files_estagio:
-            estagio_candidates = files_estagio
-        if not estagio_candidates:
-            st.error(f"Não encontrei parquet com EstagioClusterizacao em {base_ori}.")
-            st.stop()
+        if not estagio_candidates: estagio_candidates = files_estagio
+        if not estagio_candidates: st.error(f"Não encontrei EstagioClusterizacao em {base_ori}."); st.stop()
         sel_estagio = st.selectbox("Arquivo EstagioClusterizacao", [f["name"] for f in estagio_candidates])
         est_file = next(x for x in estagio_candidates if x["name"] == sel_estagio)
         df_est = load_parquet(repo, est_file["path"], branch)
     except Exception as e:
-        st.error(f"Erro carregando EstagioClusterizacao: {e}")
-        st.stop()
+        st.error(f"Erro carregando EstagioClusterizacao: {e}"); st.stop()
 
     years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
     year = st.select_slider("Ano", options=years, value=years[-1]) if years else None
-    if year:
-        df_est = df_est[df_est["Ano"] == year]
+    if year: df_est = df_est[df_est["Ano"] == year]
 
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
-        st.warning("As quadras ainda não foram carregadas (abra a aba 'Principal').")
-        st.stop()
+        st.warning("As quadras ainda não foram carregadas (abra a aba 'Principal')."); st.stop()
 
     join_col_est = "SQ" if "SQ" in df_est.columns else None
     join_col_quad = "SQ" if "SQ" in gdf_quadras.columns else None
     if not (join_col_est and join_col_quad):
-        st.error("É necessário que quadras e tabela de clusters possuam coluna 'SQ'.")
-        st.stop()
+        st.error("É necessário que quadras e tabela de clusters possuam coluna 'SQ'."); st.stop()
 
     cluster_cols = [c for c in df_est.columns if "cluster" in c.lower() or "estagio" in c.lower() or "label" in c.lower()]
-    if not cluster_cols:
-        st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao).")
-        st.stop()
+    if not cluster_cols: st.error("Não encontrei coluna de cluster."); st.stop()
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=0)
 
     gdfc = gdf_quadras.merge(df_est[[join_col_est, cluster_col]], left_on=join_col_quad, right_on=join_col_est, how="left")
-
     cats = [c for c in gdfc[cluster_col].dropna().unique()]
     palette = pick_categorical(len(cats))
-    cmap = {cat: palette[i] for i,cat in enumerate(cats)}
+    try: cats_sorted = sorted(cats, key=lambda x: float(x))
+    except Exception: cats_sorted = sorted(cats, key=lambda x: str(x))
+    cmap = {cat: palette[i] for i,cat in enumerate(cats_sorted)}
 
     gdfc["value"] = gdfc[cluster_col]
     gj = make_geojson(gdfc)
@@ -591,17 +603,14 @@ with tab2:
         hexc = cmap.get(val, "#999999")
         feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
-    colA, colB = st.columns([1,1], gap="large")
+    colA, colB = st.columns([4,1], gap="large")
     with colA:
         st.markdown("#### Mapa — Clusters")
         base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True)
-        if base.startswith("Satélite"):
-            deck([render_geojson_layer(gj, name="clusters")], satellite=True)
-        else:
-            osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
+        if base.startswith("Satélite"): deck([render_geojson_layer(gj, name="clusters")], satellite=True)
+        else: osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
     with colB:
-        st.markdown("#### Legenda")
-        st.write(pd.DataFrame({"cluster": list(cmap.keys()), "cor": list(cmap.values())}))
+        render_legend_categorical(cmap, title=f"Legenda — {cluster_col}")
 
     st.subheader("Métricas por cluster/ano")
     opt_vers = st.radio("Versão dos dados", ["originais", "winsorizados"], index=0, horizontal=True)
@@ -611,7 +620,6 @@ with tab2:
         if opt_vers == "originais" else
         ["Data/analises/winsorizados", "Data/analises/Winsorizados"]
     )
-
     try:
         files_metrics_csv = list_files(repo, base_metrics, branch, (".csv",))
         files_metrics_parq = list_files(repo, base_metrics, branch, (".parquet",))
@@ -637,8 +645,7 @@ with tab2:
             with c2:
                 if cols_cluster:
                     cl_sel = st.multiselect("Clusters", sorted(dfm[cols_cluster[0]].dropna().unique().tolist()))
-                    if cl_sel:
-                        dfm = dfm[dfm[cols_cluster[0]].isin(cl_sel)]
+                    if cl_sel: dfm = dfm[dfm[cols_cluster[0]].isin(cl_sel)]
             st.dataframe(dfm, use_container_width=True)
     except Exception as e:
         st.warning(f"Falha ao ler métricas: {e}")
@@ -660,20 +667,15 @@ with tab2:
 
     st.markdown("**Teste t par-a-par entre clusters**")
     try:
-        st.caption("Selecione um `.parquet` (originais/winsorize) e uma variável numérica; junta com clusters e calcula t-test entre pares.")
+        st.caption("Selecione um `.parquet` (originais/winsorize) e uma variável numérica; junta com clusters e calcula t-test.")
         src_type = st.radio("Origem", ["originais", "winsorize"], horizontal=True, index=0, key="tt_src")
-        var_dir = pick_existing_dir(
-            repo, branch,
-            [f"Data/dados/{src_type}",
-             f"Data/dados/{'Originais' if src_type=='originais' else 'winsorizados'}"]
-        )
+        var_dir = pick_existing_dir(repo, branch, [f"Data/dados/{src_type}", f"Data/dados/{'Originais' if src_type=='originais' else 'winsorizados'}"])
         files_vars = list_files(repo, var_dir, branch, (".parquet",))
         if files_vars:
             sel_vf = st.selectbox("Arquivo com variáveis", [f["name"] for f in files_vars], key="tt_file")
             vf_obj = next(x for x in files_vars if x["name"] == sel_vf)
             dfv = load_parquet(repo, vf_obj["path"], branch)
-            if year and "Ano" in dfv.columns:
-                dfv = dfv[dfv["Ano"]==year]
+            if year and "Ano" in dfv.columns: dfv = dfv[dfv["Ano"]==year]
             num_cols = [c for c in dfv.columns if c not in ("SQ","Ano") and pd.api.types.is_numeric_dtype(dfv[c])]
             if num_cols:
                 vsel = st.selectbox("Variável numérica", num_cols, key="tt_var")
@@ -703,9 +705,7 @@ with tab3:
     files_pq = list_files(repo, base_dir, branch, (".parquet",))
     files_csv = list_files(repo, base_dir, branch, (".csv",))
     files_all = files_pq + files_csv
-    if not files_all:
-        st.error(f"Sem arquivos em {base_dir}.")
-        st.stop()
+    if not files_all: st.error(f"Sem arquivos em {base_dir}."); st.stop()
 
     sel_file = st.selectbox("Arquivo de dados", [f["name"] for f in files_all])
     fobj = next(x for x in files_all if x["name"] == sel_file)
@@ -770,47 +770,277 @@ with tab3:
             st.info("Necessário ao menos 1 categórica e 1 numérica.")
 
 # -----------------------------------------------------------------------------
-# ABA 4 — ML → PCA
+# ABA 4 — PCA (em arquivo separado)
 # -----------------------------------------------------------------------------
 with tab4:
-    st.subheader("Variância explicada (PCA)")
-    base = pick_existing_dir(repo, branch, ["Data/analises/PCA", "Data/Analises/PCA"])
-    files_pq = list_files(repo, base, branch, (".parquet",))
-    files_csv = list_files(repo, base, branch, (".csv",))
-    files_all = files_pq + files_csv
-    if not files_all:
-        st.info(f"Sem arquivos em {base}.")
-        st.stop()
+    render_pca_tab(
+        repo=repo,
+        branch=branch,
+        pick_existing_dir=pick_existing_dir,
+        list_files=list_files,
+        load_parquet=load_parquet,
+        load_csv=load_csv,
+        github_tree_paths=github_tree_paths
+    )
 
-    st.caption("Selecione um arquivo PCA com colunas como `component` e `explained_variance_ratio` (ou similares).")
-    sel = st.selectbox("Arquivo PCA", [f["name"] for f in files_all])
-    fobj = next(x for x in files_all if x["name"] == sel)
-    dfpca = load_parquet(repo, fobj["path"], branch) if fobj["name"].endswith(".parquet") else load_csv(repo, fobj["path"], branch)
-
-    comp_col = next((c for c in dfpca.columns if c.lower().startswith("comp")), dfpca.columns[0])
-    evr_col = next((c for c in dfpca.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
-    if evr_col is None:
-        evr_col = next((c for c in dfpca.columns if "variance" in c.lower() and "ratio" in c.lower()), None)
-    if evr_col is None:
-        st.error("Não encontrei coluna com 'explained_variance_ratio'.")
-        st.dataframe(dfpca.head(), use_container_width=True)
-        st.stop()
-
-    dfp = dfpca[[comp_col, evr_col]].dropna().copy()
-    dfp.columns = ["component","explained_variance_ratio"]
-    try:
-        dfp = dfp.sort_values("component")
-    except Exception:
-        pass
-    dfp["cumulative"] = dfp["explained_variance_ratio"].cumsum()
-
-    c1, c2 = st.columns(2)
-    with c1:
-        fig = px.bar(dfp, x="component", y="explained_variance_ratio", title="Scree — Variância explicada por componente")
+    
+    def _find_pca_base_dir(repo, branch, pick_existing_dir):
+        return pick_existing_dir(repo, branch, ["Data/analises/PCA", "Data/Analises/PCA", "data/analises/PCA"])
+    
+    def _classify_pca_file(df: pd.DataFrame):
+        cols = [c.lower() for c in df.columns]
+        # explained variance ratio
+        if any(("explained" in c and "ratio" in c) for c in cols) or "explained_variance_ratio" in cols:
+            return "evr"
+        # long format: columns include 'component' and 'loading' (or similar)
+        if ("component" in cols and ("loading" in cols or "valor" in cols or "carga" in cols)):
+            return "loadings_long"
+        # wide loadings: multiple PC columns, rows are features
+        pc_like = [c for c in cols if c.startswith("pc") or c.startswith("component")]
+        if len(pc_like) >= 2:
+            return "loadings_wide"
+        # scores (projeções por observação) — tem PCs e identificador (SQ/ID)
+        id_like = any(c in cols for c in ["sq","id","codigo","code"])
+        has_pcs = any(c.startswith("pc") for c in cols)
+        if has_pcs:
+            return "scores" if id_like else "scores_no_id"
+        return "unknown"
+    
+    def _list_candidate_files(repo, branch, base_dir, list_files, load_parquet, load_csv):
+        files_all = list_files(repo, base_dir, branch, (".parquet",".csv"))
+        candidates = {"evr": [], "loadings": [], "scores": [], "unknown": []}
+        for f in files_all:
+            try:
+                df = load_parquet(repo, f["path"], branch) if f["name"].endswith(".parquet") else load_csv(repo, f["path"], branch)
+                kind = _classify_pca_file(df)
+            except Exception:
+                kind = "unknown"
+                df = None
+            if kind == "evr":
+                candidates["evr"].append((f, "evr"))
+            elif kind in ("loadings_long","loadings_wide"):
+                candidates["loadings"].append((f, kind))
+            elif kind in ("scores","scores_no_id"):
+                candidates["scores"].append((f, kind))
+            else:
+                candidates["unknown"].append((f, "unknown"))
+        return candidates
+    
+    def _tidy_loadings(df: pd.DataFrame):
+        cols_lower = {c: c.lower() for c in df.columns}
+        if "component" in cols_lower.values() and any(x in cols_lower.values() for x in ["loading","valor","carga"]):
+            # long
+            comp_col = next(k for k,v in cols_lower.items() if v=="component")
+            load_col = next(k for k,v in cols_lower.items() if v in ("loading","valor","carga"))
+            # variável/feature
+            var_col = next((k for k,v in cols_lower.items() if v in ("variable","feature","variavel","atributo")), None)
+            if var_col is None:
+                # tenta inferir: outra coluna não numérica
+                non_num = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c]) and c != comp_col]
+                var_col = non_num[0] if non_num else comp_col
+            out = df[[var_col, comp_col, load_col]].copy()
+            out.columns = ["variable","component","loading"]
+            return out
+        # wide: variáveis como índice/coluna e PCs como colunas
+        pc_cols = [c for c in df.columns if c.lower().startswith("pc") or c.lower().startswith("component")]
+        if pc_cols:
+            var_candidates = [c for c in df.columns if c not in pc_cols]
+            if len(var_candidates) == 0:
+                # se não há coluna de variável, use index
+                df = df.copy(); df["variable"] = df.index.astype(str)
+                var_col = "variable"
+            else:
+                var_col = var_candidates[0]
+            long = df.melt(id_vars=[var_col], value_vars=pc_cols, var_name="component", value_name="loading")
+            long.columns = ["variable","component","loading"]
+            return long
+        # fallback: devolve vazio
+        return pd.DataFrame(columns=["variable","component","loading"])
+    
+    def _prep_scores(df: pd.DataFrame):
+        cols = {c.lower(): c for c in df.columns}
+        # tenta normalizar nomes de PCs
+        pc_cols = [c for c in df.columns if c.lower().startswith("pc")]
+        # id / SQ
+        id_col = cols.get("sq") or cols.get("id") or cols.get("codigo") or cols.get("code")
+        ano_col = cols.get("ano")
+        return pc_cols, id_col, ano_col
+    
+    def _render_evr_section(df_evr: pd.DataFrame):
+        # normaliza nomes
+        cols = {c.lower(): c for c in df_evr.columns}
+        if "explained_variance_ratio" in cols:
+            evr_col = cols["explained_variance_ratio"]; comp_col = None
+        else:
+            evr_col = next((c for c in df_evr.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
+            comp_col = next((c for c in df_evr.columns if c.lower().startswith("comp") or c.lower().startswith("pc")), None)
+        df = df_evr.copy()
+        if comp_col is None:
+            # cria componente incremental
+            df = df.reset_index(drop=True)
+            df["component"] = [f"PC{i+1}" for i in range(len(df))]
+            comp_col = "component"
+        else:
+            df["component"] = df[comp_col].astype(str)
+        df["explained_variance_ratio"] = df[evr_col].astype(float)
+        df = df[["component","explained_variance_ratio"]].dropna()
+        try: df = df.sort_values("component")
+        except Exception: pass
+        df["cumulative"] = df["explained_variance_ratio"].cumsum()
+    
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.bar(df, x="component", y="explained_variance_ratio", title="Scree — Variância explicada por componente")
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            fig2 = px.line(df, x="component", y="cumulative", markers=True, title="Variância explicada acumulada")
+            st.plotly_chart(fig2, use_container_width=True)
+    
+        thr = st.slider("Limite cumulativo desejado", 0.50, 0.99, 0.80, 0.01)
+        n_comp = int((df["cumulative"] <= thr).sum() + 1)
+        n_comp = min(n_comp, len(df))
+        st.info(f"Componentes necessários para atingir {thr:.0%}: **{n_comp}**")
+        st.dataframe(df, use_container_width=True)
+    
+    def _render_loadings_section(df_load: pd.DataFrame):
+        long = _tidy_loadings(df_load)
+        if long.empty:
+            st.warning("Não foi possível identificar a estrutura de *loadings* deste arquivo."); 
+            st.dataframe(df_load.head(), use_container_width=True)
+            return
+        comps = sorted(long["component"].astype(str).unique(), key=lambda x: (len(x), x))
+        c1, c2 = st.columns([2,1])
+        with c1:
+            comp_sel = st.selectbox("Componente", comps, index=0)
+        with c2:
+            topn = st.slider("Top |loading|", 5, 30, 15)
+    
+        sub = long[long["component"].astype(str)==str(comp_sel)].copy()
+        sub["abs_loading"] = sub["loading"].abs()
+        sub = sub.sort_values("abs_loading", ascending=False).head(topn)
+        fig = px.bar(sub.sort_values("abs_loading"), x="abs_loading", y="variable", orientation="h",
+                     title=f"Maiores |loadings| — {comp_sel}")
         st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        fig2 = px.line(dfp, x="component", y="cumulative", markers=True, title="Variância explicada acumulada")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("Tabela PCA")
-    st.dataframe(dfp, use_container_width=True)
+        st.dataframe(sub.drop(columns=["abs_loading"]), use_container_width=True)
+    
+    def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
+        pc_cols, id_col, ano_col = _prep_scores(df_scores)
+        if not pc_cols:
+            st.warning("Arquivo de *scores* sem colunas de PCs identificáveis."); 
+            st.dataframe(df_scores.head(), use_container_width=True)
+            return
+        color_by = None
+        # filtro opcional por ano
+        if ano_col:
+            anos = sorted([int(x) for x in df_scores[ano_col].dropna().unique()])
+            ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1])
+            df_scores = df_scores[df_scores[ano_col]==ano_sel]
+    
+        st.markdown("**Colorir por cluster (opcional)**")
+        color_opt = st.checkbox("Colorir pontos pelo `EstagioClusterizacao`", value=False)
+        cluster_series = None
+        if color_opt:
+            base_ori = pick_existing_dir(repo, branch, ["Data/dados/Originais", "Data/dados/originais"])
+            files_estagio = list_files(repo, base_ori, branch, (".parquet",))
+            estagio_candidates = [f for f in files_estagio if "estagioclusterizacao" in f["name"].lower() or f["name"].lower().startswith("estagio")]
+            if not estagio_candidates: estagio_candidates = files_estagio
+            if estagio_candidates:
+                sel_e = st.selectbox("Arquivo EstagioClusterizacao", [f["name"] for f in estagio_candidates], key="pca_color_estagio")
+                eobj = next(x for x in estagio_candidates if x["name"] == sel_e)
+                dfe = load_parquet(repo, eobj["path"], branch)
+                # filtro ano se existir
+                if ano_col and "Ano" in dfe.columns and ano_sel is not None:
+                    dfe = dfe[dfe["Ano"]==ano_sel]
+                # encontra coluna de cluster
+                cl_cols = [c for c in dfe.columns if "cluster" in c.lower() or "estagio" in c.lower() or "label" in c.lower()]
+                if cl_cols:
+                    col_cluster = st.selectbox("Coluna de cluster", cl_cols, index=0, key="pca_color_clustercol")
+                    if id_col and id_col in df_scores.columns and "SQ" in dfe.columns:
+                        cluster_series = dfe[["SQ", col_cluster]].dropna()
+                        # junta
+                        df_scores = df_scores.merge(cluster_series, left_on=id_col, right_on="SQ", how="left")
+                        color_by = col_cluster
+                    else:
+                        st.info("Não foi possível juntar clusters: verifique colunas `SQ`/ID nos scores.")
+                else:
+                    st.info("Arquivo selecionado não contém coluna de cluster.")
+            else:
+                st.info("Não encontrei arquivos de EstagioClusterizacao.")
+    
+        # escolhe PCs para biplot
+        pc_x = st.selectbox("PC eixo X", pc_cols, index=0)
+        # pega "PC2" ou próximo como default y
+        idx_y = 1 if len(pc_cols) > 1 else 0
+        pc_y = st.selectbox("PC eixo Y", pc_cols, index=idx_y)
+        hover_cols = [pc_x, pc_y]
+        if id_col: hover_cols.insert(0, id_col)
+        if color_by and color_by in df_scores.columns:
+            fig = px.scatter(df_scores, x=pc_x, y=pc_y, color=color_by, hover_data=hover_cols,
+                             title=f"Biplot (scores) — {pc_x} × {pc_y}")
+        else:
+            fig = px.scatter(df_scores, x=pc_x, y=pc_y, hover_data=hover_cols,
+                             title=f"Biplot (scores) — {pc_x} × {pc_y}")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df_scores[hover_cols + ([color_by] if color_by else [])].dropna(how="all"), use_container_width=True)
+    
+    def render_pca_tab(repo, branch, pick_existing_dir, list_files, load_parquet, load_csv, github_tree_paths):
+        st.subheader("Arquivos de PCA")
+        base_dir = _find_pca_base_dir(repo, branch, pick_existing_dir)
+    
+        # lista/categorização de arquivos de PCA
+        with st.spinner("Procurando arquivos de PCA..."):
+            cands = _list_candidate_files(repo, branch, base_dir, list_files, load_parquet, load_csv)
+    
+        st.caption(f"Diretório PCA: `{base_dir}`")
+        # =========================
+        # 1) Variância explicada
+        # =========================
+        st.markdown("### 1) Variância explicada (Scree + cumulativa)")
+        if cands["evr"]:
+            sel_evr_name = st.selectbox("Arquivo de variância explicada", [f["name"] for f,_ in cands["evr"]], index=0)
+            evr_obj, _ = next(x for x in cands["evr"] if x[0]["name"] == sel_evr_name)
+            df_evr = load_parquet(repo, evr_obj["path"], branch) if evr_obj["name"].endswith(".parquet") else load_csv(repo, evr_obj["path"], branch)
+            _render_evr_section(df_evr)
+        else:
+            st.info("Nenhum arquivo claramente identificado como 'explained_variance_ratio'. "
+                    "Selecione manualmente um arquivo abaixo (opção avançada).")
+            # fallback manual: permite o usuário escolher qualquer arquivo e tenta interpretar
+            all_names = [f["name"] for f in list_files(repo, base_dir, branch, (".csv",".parquet"))]
+            if all_names:
+                manual = st.selectbox("Escolher arquivo manualmente (tentativa EVR):", all_names, index=0)
+                mobj = next(x for x in list_files(repo, base_dir, branch, (".csv",".parquet")) if x["name"] == manual)
+                dfm = load_parquet(repo, mobj["path"], branch) if mobj["name"].endswith(".parquet") else load_csv(repo, mobj["path"], branch)
+                try:
+                    _render_evr_section(dfm)
+                except Exception:
+                    st.warning("Não consegui interpretar este arquivo como variância explicada.")
+                    st.dataframe(dfm.head(), use_container_width=True)
+    
+        st.divider()
+    
+        # =========================
+        # 2) Loadings (cargas)
+        # =========================
+        st.markdown("### 2) Cargas (loadings) por componente")
+        if cands["loadings"]:
+            sel_load_name = st.selectbox("Arquivo de loadings", [f["name"] for f,_ in cands["loadings"]], index=0)
+            load_obj, kind = next(x for x in cands["loadings"] if x[0]["name"] == sel_load_name)
+            df_load = load_parquet(repo, load_obj["path"], branch) if load_obj["name"].endswith(".parquet") else load_csv(repo, load_obj["path"], branch)
+            _render_loadings_section(df_load)
+        else:
+            st.info("Nenhum arquivo de *loadings* identificado.")
+    
+        st.divider()
+    
+        # =========================
+        # 3) Scores / Biplot
+        # =========================
+        st.markdown("### 3) Scores / Projeções (Biplot PC1×PC2)")
+        if cands["scores"]:
+            sel_scores_name = st.selectbox("Arquivo de scores", [f["name"] for f,_ in cands["scores"]], index=0)
+            sc_obj, kind = next(x for x in cands["scores"] if x[0]["name"] == sel_scores_name)
+            df_scores = load_parquet(repo, sc_obj["path"], branch) if sc_obj["name"].endswith(".parquet") else load_csv(repo, sc_obj["path"], branch)
+            _render_scores_section(df_scores, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv)
+        else:
+            st.info("Nenhum arquivo de *scores* (projeções) identificado.")
+    
