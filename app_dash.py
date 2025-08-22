@@ -1305,15 +1305,17 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (somente leitura/visualização) — VERSÃO ROBUSTA
+# ABA 2 — Clusterização (somente leitura/visualização) — REWRITE
 # -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa de Clusters + Métricas + Spearman (somente leitura)")
 
+    # -----------------------------
     # 2.1) Carregar CLUSTERS (tolerante a variações de diretório/arquivo)
+    # -----------------------------
     clusters_dir = pick_existing_dir(
         repo, branch,
-        ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
+        ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"],
     )
     all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
 
@@ -1323,20 +1325,21 @@ with tab2:
 
     if not cand:
         st.error(
-            "Não encontrei arquivo de clusterização. Coloque `EstagioClusterizacao.csv/.parquet` "
-            "ou algum arquivo com 'estagio' e 'cluster' no nome."
+            "Não encontrei arquivo de clusterização. Coloque `EstagioClusterizacao.csv`/`.parquet` "
+            f"ou um arquivo com 'estagio' e 'cluster' em `{clusters_dir}`."
         )
         st.stop()
 
     est_file = cand[0]
     df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
 
-    # 2.2) Seleções de ano e coluna de cluster
+    # Filtro por ano (se houver)
     years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
-    year_sel = st.select_slider("Ano", options=years, value=years[-1], key="clu_ano") if years else None
+    year_sel = st.select_slider("Ano (clusters)", options=years, value=years[-1], key="clu_ano") if years else None
     if year_sel is not None:
         df_est = df_est[df_est["Ano"] == year_sel]
 
+    # Coluna de cluster
     cluster_cols = [c for c in df_est.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
@@ -1344,7 +1347,10 @@ with tab2:
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
 
-    # 2.3) Garantir merge por SQ (normalizado como string)
+    # -----------------------------
+    # 2.2) Garantir SQ como STRING e fazer o MERGE
+    # -----------------------------
+    # carrega quadras (se ainda não estiver em cache)
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
@@ -1354,84 +1360,86 @@ with tab2:
             st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
             st.stop()
 
+    # detectar colunas SQ
     join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not (join_est and join_quad):
         st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ' (qualquer caixa).")
         st.stop()
 
+    # CAST PARA STRING (+ trim) ANTES DO MERGE
     df_est = df_est.copy()
-    gdf_quadras = gdf_quadras.copy()
-    df_est["__SQ_JOIN__"] = df_est[join_est].astype(str).str.strip()
-    gdf_quadras["__SQ_JOIN__"] = gdf_quadras[join_quad].astype(str).str.strip()
+    gdfq = gdf_quadras.copy()
+    df_est[join_est] = df_est[join_est].astype(str).str.strip()
+    gdfq[join_quad] = gdfq[join_quad].astype(str).str.strip()
 
-    gdfc = gdf_quadras.merge(
-        df_est[["__SQ_JOIN__", cluster_col]],
-        on="__SQ_JOIN__", how="left"
-    )
+    # MERGE
+    gdfc = gdfq.merge(df_est[[join_est, cluster_col]], left_on=join_quad, right_on=join_est, how="left")
 
-    # 2.4) Cores e legenda consistentes
-    # Detecta se os valores são 0..3 numéricos; se sim, aplica rótulos oficiais
-    lbl_map_official = {
+    # -----------------------------
+    # 2.3) Normalizar rótulos de cluster (categorias + nomes amigos)
+    # -----------------------------
+    def _to_int_or_none(x):
+        try:
+            v = float(x)
+            return int(v) if v.is_integer() else None
+        except Exception:
+            return None
+
+    # código inteiro quando possível (0..3), senão mantém string do valor
+    code = gdfc[cluster_col].apply(_to_int_or_none)
+    label_map = {
         0: "0 – Ausência de clusterização",
         1: "1 – Cluster em estágio inicial",
         2: "2 – Cluster em formação",
         3: "3 – Clusterizado",
     }
+    gdfc["cluster_lbl"] = np.where(code.notna(), code.map(label_map), gdfc[cluster_col].astype(str))
 
-    vals_raw = df_est[cluster_col]
-    vals_num = pd.to_numeric(vals_raw, errors="coerce")
-    use_numeric = vals_num.notna().mean() >= 0.8  # maioria numérica → trata como 0..3
+    # categorias (para paleta e legenda) — sempre pela string pronta
+    cats_sorted = sorted(gdfc["cluster_lbl"].dropna().unique().tolist(), key=lambda x: str(x))
+    palette = pick_categorical(len(cats_sorted))
+    cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
 
-    if use_numeric:
-        # normaliza para Int64, preservando NaN
-        gdfc["__cluster_int__"] = pd.to_numeric(gdfc[cluster_col], errors="coerce").astype("Int64")
-        stages = [int(v) for v in sorted(gdfc["__cluster_int__"].dropna().unique().tolist())]
-        palette = pick_categorical(len(stages))
-        value_to_hex = {stages[i]: palette[i] for i in range(len(stages))}
-        value_to_label = {v: lbl_map_official.get(v, str(v)) for v in stages}
+    # coluna usada para colorir no GeoJSON
+    gdfc["value"] = gdfc["cluster_lbl"]
 
-        gdfc["__fill_hex__"] = gdfc["__cluster_int__"].map(lambda v: value_to_hex.get(int(v), "#999999") if pd.notna(v) else "#999999")
-        gdfc["__legend_label__"] = gdfc["__cluster_int__"].map(lambda v: value_to_label.get(int(v), str(v)) if pd.notna(v) else "Sem dado")
-        legend_items = [(value_to_label[v], value_to_hex[v]) for v in stages]
-    else:
-        # categorias textuais
-        cats = sorted(gdfc[cluster_col].dropna().astype(str).unique().tolist())
-        palette = pick_categorical(len(cats))
-        value_to_hex = {cats[i]: palette[i] for i in range(len(cats))}
-        gdfc["__fill_hex__"] = gdfc[cluster_col].astype(str).map(lambda v: value_to_hex.get(v, "#999999"))
-        gdfc["__legend_label__"] = gdfc[cluster_col].astype(str)
-        legend_items = [(c, value_to_hex[c]) for c in cats]
-
-    # 2.5) GeoJSON + Mapas
+    # -----------------------------
+    # 2.4) MAPA de quadras por cluster (categorias)
+    # -----------------------------
     gj = make_geojson(gdfc)
     for feat in gj.get("features", []):
-        props = feat.setdefault("properties", {})
-        hexc = props.get("__fill_hex__", "#999999")
-        props["fill_color"] = hex_to_rgba(hexc)
-        # tooltip bonitinho
-        label = props.get("__legend_label__", "")
-        props["name"] = str(cluster_col)
-        props["value"] = label
+        lab = feat.get("properties", {}).get("value", None)
+        hexc = cmap.get(lab, "#999999")
+        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
-    colM, colL = st.columns([4, 1], gap="large")
+    colM, colL = st.columns([4.5, 1], gap="large")
     with colM:
         st.markdown("#### Mapa — Clusters por SQ")
-        base_map = st.radio(
-            "Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
-            index=0, horizontal=True, key="clu_base"
-        )
+        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
         if base_map.startswith("Satélite"):
             deck([render_geojson_layer(gj, name="clusters")], satellite=True)
         else:
             osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
-
     with colL:
         st.markdown(f"**Legenda — {cluster_col}**")
-        for text, hexc in legend_items:
-            _legend_row(hexc, text)
+        for lab in cats_sorted:
+            _legend_row(cmap[lab], lab)
 
-    # 2.6) Recortes (opcional)
+    # Painel rápido de debug (tipos e amostras) — pode remover depois
+    with st.expander("🔎 Debug (tipos e amostras de chaves SQ)", expanded=False):
+        st.write({
+            "dtype df_est[SQ]": str(df_est[join_est].dtype),
+            "dtype gdf_quadras[SQ]": str(gdfq[join_quad].dtype),
+            "amostra df_est[SQ]": df_est[join_est].dropna().astype(str).head(5).tolist(),
+            "amostra gdf_quadras[SQ]": gdfq[join_quad].dropna().astype(str).head(5).tolist(),
+        })
+
+    st.divider()
+
+    # -----------------------------
+    # 2.5) MAPA de Recortes (opcional)
+    # -----------------------------
     st.markdown("#### Mapa — Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
     try:
@@ -1440,8 +1448,32 @@ with tab2:
             rec_sel = st.selectbox("Arquivo de recorte", [f["name"] for f in rec_files], index=0, key="clu_rec_file")
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-            layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
-            colRm, colRl = st.columns([4, 1], gap="large")
+
+            # interseção por SQ (mantém apenas SQs presentes no recorte, se houver coluna SQ no recorte)
+            join_rec = next((c for c in gdf_rec.columns if str(c).upper() == "SQ"), None)
+            if join_rec:
+                gdf_rec = gdf_rec.copy()
+                gdf_rec[join_rec] = gdf_rec[join_rec].astype(str).str.strip()
+                sq_keep = set(gdf_rec[join_rec].dropna().astype(str).unique())
+                gdfc_rec = gdfc[gdfc[join_quad].astype(str).isin(sq_keep)].copy()
+            else:
+                # sem coluna SQ no recorte → apenas desenha o contorno
+                gdfc_rec = gdfc.head(0).copy()
+
+            # pinta o recorte com a mesma lógica de cores/legenda
+            layers_rec = []
+            if len(gdfc_rec) > 0:
+                gj_rec = make_geojson(gdfc_rec)
+                for feat in gj_rec.get("features", []):
+                    lab = feat.get("properties", {}).get("value", None)
+                    hexc = cmap.get(lab, "#999999")
+                    feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+                layers_rec.append(render_geojson_layer(gj_rec, name="clusters_recorte"))
+
+            # contorno do recorte
+            layers_rec.append(render_line_layer(make_geojson(gdf_rec), name="recorte"))
+
+            colRm, colRl = st.columns([4.5, 1], gap="large")
             with colRm:
                 if base_map.startswith("Satélite"):
                     deck(layers_rec, satellite=True)
@@ -1449,7 +1481,8 @@ with tab2:
                     osm_basemap_deck(layers_rec)
             with colRl:
                 st.markdown("**Legenda — Recorte**")
-                _legend_row("#444444", "Contorno do recorte")
+                for lab in cats_sorted:
+                    _legend_row(cmap[lab], lab)
         else:
             st.caption(f"Pasta `{rec_dir}` vazia.")
     except Exception as e:
@@ -1457,6 +1490,7 @@ with tab2:
 
     st.divider()
 
+    
     # ------------------------------------------
     # 2.7 Spearman (pares) — tabela + heatmap
     # ------------------------------------------
@@ -1648,6 +1682,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
