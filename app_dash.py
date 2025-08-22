@@ -22,6 +22,29 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# CONFIG GERAL (coloque logo no topo, antes de qualquer st.*)
+# ==========================
+st.set_page_config(
+    page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
+    page_icon="🧠",
+    layout="wide",
+)
+TITLE = "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
+st.title(TITLE)
+
+# (opcional) deixar o conteúdo mais largo e garantir que o texto das abas apareça
+st.markdown("""
+<style>
+/* ampliar a área útil do app */
+.block-container { max-width: 1600px; padding-top: 0.75rem; }
+/* garantir que os rótulos das abas fiquem visíveis */
+.stTabs [data-baseweb="tab"] p { 
+  margin: 0; 
+  font-size: 15px !important; 
+  color: rgba(17,17,17,1) !important;   /* força cor escura */
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================
 # GITHUB I/O HELPERS
@@ -826,11 +849,10 @@ if not repo or not branch:
 # ==========================
 # TABS
 # ==========================
-tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"])
+TAB_LABELS = ["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"]
+tab1, tab2, tab3, tab4 = st.tabs(TAB_LABELS)
 
-# -----------------------------------------------------------------------------
-# ABA 1 — Principal (mapa + dados por SQ + recortes) — VERSÃO REESCRITA
-# -----------------------------------------------------------------------------
+
 # -----------------------------------------------------------------------------
 # ABA 1 — Principal (mapa + dados por SQ + recortes) — AJUSTADA
 # -----------------------------------------------------------------------------
@@ -1649,6 +1671,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
