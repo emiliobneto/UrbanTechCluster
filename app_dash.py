@@ -1,15 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-app_core.py — Módulo de suporte para a aplicação Streamlit.
-Inclui:
-  • I/O via GitHub (com cache)
-  • Funções de mapas/legendas
-  • Utilidades para busca de arquivos/tabulares
-  • Utilidades PCA (renderização sem recálculo)
-Observação: este arquivo é importado pelo app principal (app_main.py).
-"""
-from __future__ import annotations
-
 import io
 import os
 import re
@@ -67,7 +55,6 @@ def github_repo_info(owner_repo: str):
     if r.status_code != 200:
         raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
     return r.json()
-
 
 def resolve_branch(owner_repo: str, user_branch: str | None):
     owner_repo = normalize_repo(owner_repo)
@@ -1030,8 +1017,6 @@ with tab1:
                 deck(layers_rec, satellite=basemap.startswith("Satélite"))
             with col_l:
                 st.markdown("**Legenda — Recorte**")
-                from app_core import _legend_row
-
                 _legend_row("#444444", "Contorno do recorte")
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
@@ -1137,8 +1122,6 @@ with tab2:
             osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
     with colL:
         st.markdown(f"**Legenda — {cluster_col}**")
-        from app_core import _legend_row
-
         for k in cats_sorted:
             _legend_row(cmap[k], str(k))
 
@@ -1163,8 +1146,6 @@ with tab2:
                 else:
                     osm_basemap_deck(layers_rec)
             with colRl:
-                from app_core import _legend_row
-
                 st.markdown("**Legenda — Recorte**")
                 _legend_row("#444444", "Contorno do recorte")
         else:
@@ -1404,4 +1385,5 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
