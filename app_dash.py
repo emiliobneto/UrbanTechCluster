@@ -389,31 +389,61 @@ def pairs_to_matrix(df_pairs: pd.DataFrame, i_col: str, j_col: str, val_col: str
 # IMPORTA A ABA 4 (PCA)
 # ==========================
 # --- Import da aba PCA de forma resiliente ---
-def _import_render_pca_tab():
-    try:
-        # 1) mesmo diretório do app_dash.py
-        from ml_pca_tab import render_pca_tab as _render
-        return _render
-    except ModuleNotFoundError:
+def _import_render_pca_tab_strong():
+    import importlib, importlib.util, sys, os
+    here = os.path.dirname(__file__)
+    parent = os.path.dirname(here)
+
+    # 1) tentativas de import "normais"
+    last_err = None
+    for modname in ("ml_pca_tab", "urbantechcluster.ml_pca_tab"):
         try:
-            # 2) import absoluto, se o pacote `urbantechcluster` existir
-            from urbantechcluster.ml_pca_tab import render_pca_tab as _render
-            return _render
-        except ModuleNotFoundError:
-            # 3) carregar pelo caminho do arquivo (fallback)
-            import importlib.util, sys, os
-            here = os.path.dirname(__file__)
-            cand = os.path.join(here, "ml_pca_tab.py")
-            if os.path.exists(cand):
-                spec = importlib.util.spec_from_file_location("ml_pca_tab", cand)
+            mod = importlib.import_module(modname)
+            if hasattr(mod, "render_pca_tab"):
+                return mod.render_pca_tab
+        except Exception as e:
+            last_err = e  # pode ser ImportError, ModuleNotFoundError etc.
+
+    # 2) tentativas por caminho (mesmo dir e diretório pai)
+    candidates = [
+        os.path.join(here, "ml_pca_tab.py"),
+        os.path.join(parent, "ml_pca_tab.py"),
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                spec = importlib.util.spec_from_file_location("ml_pca_tab", path)
                 mod = importlib.util.module_from_spec(spec)
                 sys.modules["ml_pca_tab"] = mod
                 spec.loader.exec_module(mod)
-                return mod.render_pca_tab
-            # se chegou aqui, realmente não existe o arquivo
-            raise
+                if hasattr(mod, "render_pca_tab"):
+                    return mod.render_pca_tab
+        except Exception as e:
+            last_err = e
 
-render_pca_tab = _import_render_pca_tab()
+    # 3) se não achou, retorna None e deixamos a aba PCA desabilitada
+    return None, last_err
+
+_render = _import_render_pca_tab_strong()
+if isinstance(_render, tuple):
+    render_pca_tab, _render_err = _render
+else:
+    render_pca_tab, _render_err = _render, None
+
+# feedback no sidebar e fallback para não quebrar a app
+if render_pca_tab is None:
+    st.sidebar.error(
+        "Aba 4 (PCA) desabilitada: não encontrei `ml_pca_tab.py` "
+        "no mesmo diretório nem no diretório pai.\n"
+        f"Detalhe: {repr(_render_err)}"
+    )
+    def render_pca_tab(**kwargs):
+        st.error(
+            "A aba de PCA está desabilitada porque o arquivo `ml_pca_tab.py` "
+            "não foi encontrado/importado. Coloque `ml_pca_tab.py` no mesmo "
+            "diretório do `app_dash.py` (ou dentro do pacote `urbantechcluster/`) "
+            "e recarregue o app."
+        )
 
 
 # ==========================
@@ -975,5 +1005,6 @@ with tab4:
             _render_scores_section(df_scores, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv)
         else:
             st.info("Nenhum arquivo de *scores* identificado.")
+
 
 
