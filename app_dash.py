@@ -640,7 +640,7 @@ def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_
     # filtro opcional por ano
     if ano_col:
         anos = sorted([int(x) for x in df_scores[ano_col].dropna().unique()])
-        ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1])
+        ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1], key="pca_scores_ano")
         df_scores = df_scores[df_scores[ano_col]==ano_sel]
 
     pc_x = st.selectbox("PC eixo X", pc_cols, index=0)
@@ -877,8 +877,6 @@ with tab2:
     # 2.1) Carregar CLUSTERS (fixo no diretório de Originais)
     # -----------------------------
     clusters_dir = "Data/dados/Originais"
-
-    # lista só csv/parquet e filtra por nome EXATO (case-insensitive)
     all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
     cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
     
@@ -1145,6 +1143,7 @@ with tab4:
     )
     
     
+
 
 
 
