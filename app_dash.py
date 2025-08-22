@@ -1307,40 +1307,105 @@ with tab1:
 # -----------------------------------------------------------------------------
 # ABA 2 — Clusterização (somente leitura/visualização) — REWRITE
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ABA 2 — Clusterização (somente leitura/visualização) — FIX SQ 6 dígitos
+# -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa de Clusters + Métricas + Spearman (somente leitura)")
 
+    # -------- helpers --------
+    import re as _re
+
+    def _norm_sq_6(x, digits: int = 6) -> str | None:
+        """
+        Normaliza SQ preservando zeros à esquerda:
+        - remove espaços;
+        - mantém apenas dígitos;
+        - se >6 dígitos, usa os ÚLTIMOS 6 (casos com prefixos);
+        - preenche à esquerda até 6 dígitos.
+        """
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return None
+        s = str(x).strip()
+        s = _re.sub(r"\s+", "", s)
+        s = _re.sub(r"\D", "", s)  # somente dígitos
+        if s == "":
+            return None
+        if len(s) > digits:
+            s = s[-digits:]  # usa os últimos 6 dígitos
+        return s.zfill(digits)
+
+    def _to_int_code(x):
+        """Extrai 0..3 de string/float/inteiro; retorna None se não achar."""
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return None
+        try:
+            v = float(str(x).strip())
+            if np.isfinite(v) and abs(v - int(v)) < 1e-9:
+                return int(v)
+        except Exception:
+            pass
+        m = _re.search(r"\d+", str(x))
+        return int(m.group(0)) if m else None
+
+    label_map = {
+        0: "0 – Ausência de clusterização",
+        1: "1 – Cluster em estágio inicial",
+        2: "2 – Cluster em formação",
+        3: "3 – Clusterizado",
+    }
+
     # -----------------------------
-    # 2.1) Carregar CLUSTERS (tolerante a variações de diretório/arquivo)
+    # 2.1) Seleção do arquivo de clusters (GitHub + upload opcional)
     # -----------------------------
-    clusters_dir = pick_existing_dir(
-        repo, branch,
-        ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"],
+    st.caption("Fonte primária: GitHub. Você pode enviar um arquivo local para testes.")
+    up = st.file_uploader(
+        "EstagioClusterizacao (opcional: .csv ou .parquet)",
+        type=["csv", "parquet"],
+        key="clu_upl",
     )
-    all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
 
-    cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
-    if not cand:
-        cand = [f for f in all_in_dir if re.search(r"(?i)estagio", f["name"]) and re.search(r"(?i)cluster", f["name"])]
-
-    if not cand:
-        st.error(
-            "Não encontrei arquivo de clusterização. Coloque `EstagioClusterizacao.csv`/`.parquet` "
-            f"ou um arquivo com 'estagio' e 'cluster' em `{clusters_dir}`."
+    if up is not None:
+        df_est = pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up)
+        source_label = f"(upload) {up.name}"
+    else:
+        clusters_dir = pick_existing_dir(
+            repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
         )
+        all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
+        cand = [f for f in all_in_dir if _re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
+        if not cand:
+            cand = [f for f in all_in_dir if _re.search(r"(?i)estagio", f["name"]) and _re.search(r"(?i)cluster", f["name"])]
+        if not cand:
+            st.error(
+                "Não encontrei arquivo de clusterização. Coloque `EstagioClusterizacao.csv`/`.parquet` "
+                f"ou um arquivo com 'estagio' e 'cluster' em `{clusters_dir}`."
+            )
+            st.stop()
+        est_file = cand[0]
+        df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
+        source_label = f"{clusters_dir}/{est_file['name']}"
+
+    # -----------------------------
+    # 2.2) Ano + coluna de cluster
+    # -----------------------------
+    join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
+    if not join_est:
+        st.error("O arquivo de clusters não possui coluna 'SQ'.")
         st.stop()
 
-    est_file = cand[0]
-    df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
+    ano_col = next((c for c in df_est.columns if str(c).lower() == "ano"), None)
+    if ano_col:
+        anos_vals = pd.to_numeric(df_est[ano_col], errors="coerce")
+        anos_ok = sorted(anos_vals.dropna().astype(int).unique().tolist())
+        if anos_ok:
+            year_sel = st.select_slider("Ano (clusters)", options=anos_ok, value=anos_ok[-1], key="clu_ano")
+            df_est = df_est.loc[anos_vals.astype("Int64") == year_sel].copy()
+            if df_est.empty:
+                st.error(f"Sem registros de cluster para o ano {year_sel} em {source_label}.")
+                st.stop()
 
-    # Filtro por ano (se houver)
-    years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
-    year_sel = st.select_slider("Ano (clusters)", options=years, value=years[-1], key="clu_ano") if years else None
-    if year_sel is not None:
-        df_est = df_est[df_est["Ano"] == year_sel]
-
-    # Coluna de cluster
-    cluster_cols = [c for c in df_est.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
+    cluster_cols = [c for c in df_est.columns if _re.search(r"(?i)(cluster|estagio|label)", c)]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
         st.stop()
@@ -1348,9 +1413,9 @@ with tab2:
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
 
     # -----------------------------
-    # 2.2) Garantir SQ como STRING e fazer o MERGE
+    # 2.3) Normalizar SQ (6 dígitos) e resolver duplicados por SQ
     # -----------------------------
-    # carrega quadras (se ainda não estiver em cache)
+    # Quadras
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
@@ -1360,52 +1425,48 @@ with tab2:
             st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
             st.stop()
 
-    # detectar colunas SQ
-    join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
-    if not (join_est and join_quad):
-        st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ' (qualquer caixa).")
+    if not join_quad:
+        st.error("A camada de quadras não possui coluna 'SQ'.")
         st.stop()
 
-    # CAST PARA STRING (+ trim) ANTES DO MERGE
     df_est = df_est.copy()
     gdfq = gdf_quadras.copy()
-    df_est[join_est] = df_est[join_est].astype(str).str.strip()
-    gdfq[join_quad] = gdfq[join_quad].astype(str).str.strip()
 
-    # MERGE
-    gdfc = gdfq.merge(df_est[[join_est, cluster_col]], left_on=join_quad, right_on=join_est, how="left")
+    df_est["_SQ_norm"] = df_est[join_est].apply(_norm_sq_6)
+    gdfq["_SQ_norm"] = gdfq[join_quad].apply(_norm_sq_6)
+
+    # manter MAIOR estágio por SQ dentro do ano
+    df_est["_cl_code"] = df_est[cluster_col].apply(_to_int_code).fillna(-1)
+    df_est = df_est.sort_values(["_SQ_norm", "_cl_code"])  # -1 primeiro, maiores por último
+    df_est_dedup = df_est.drop_duplicates("_SQ_norm", keep="last")
 
     # -----------------------------
-    # 2.3) Normalizar rótulos de cluster (categorias + nomes amigos)
+    # 2.4) MERGE e rótulos
     # -----------------------------
-    def _to_int_or_none(x):
-        try:
-            v = float(x)
-            return int(v) if v.is_integer() else None
-        except Exception:
-            return None
+    gdfc = gdfq.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
 
-    # código inteiro quando possível (0..3), senão mantém string do valor
-    code = gdfc[cluster_col].apply(_to_int_or_none)
-    label_map = {
-        0: "0 – Ausência de clusterização",
-        1: "1 – Cluster em estágio inicial",
-        2: "2 – Cluster em formação",
-        3: "3 – Clusterizado",
-    }
-    gdfc["cluster_lbl"] = np.where(code.notna(), code.map(label_map), gdfc[cluster_col].astype(str))
+    # rótulo amigável a partir do código (0..3); caso não identifique, mantém texto original
+    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0, 1, 2, 3]))
+    gdfc["cluster_lbl"] = np.where(
+        gdfc["_cl_code_clean"].notna(),
+        gdfc["_cl_code_clean"].astype(int).map(label_map),
+        gdfc[cluster_col].astype(str),
+    )
 
-    # categorias (para paleta e legenda) — sempre pela string pronta
-    cats_sorted = sorted(gdfc["cluster_lbl"].dropna().unique().tolist(), key=lambda x: str(x))
+    # ordem da legenda por código 0->3 (apenas os presentes); fallback: ordem alfabética dos demais
+    codes_present = [int(x) for x in sorted(gdfc["_cl_code_clean"].dropna().unique())]
+    labels_from_codes = [label_map[c] for c in codes_present]
+    other_labels = sorted([l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
+    cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
+
     palette = pick_categorical(len(cats_sorted))
     cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
 
-    # coluna usada para colorir no GeoJSON
     gdfc["value"] = gdfc["cluster_lbl"]
 
     # -----------------------------
-    # 2.4) MAPA de quadras por cluster (categorias)
+    # 2.5) MAPA principal + legenda
     # -----------------------------
     gj = make_geojson(gdfc)
     for feat in gj.get("features", []):
@@ -1422,23 +1483,14 @@ with tab2:
         else:
             osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
     with colL:
-        st.markdown(f"**Legenda — {cluster_col}**")
+        st.markdown("**Legenda — Estágio**")
         for lab in cats_sorted:
             _legend_row(cmap[lab], lab)
-
-    # Painel rápido de debug (tipos e amostras) — pode remover depois
-    with st.expander("🔎 Debug (tipos e amostras de chaves SQ)", expanded=False):
-        st.write({
-            "dtype df_est[SQ]": str(df_est[join_est].dtype),
-            "dtype gdf_quadras[SQ]": str(gdfq[join_quad].dtype),
-            "amostra df_est[SQ]": df_est[join_est].dropna().astype(str).head(5).tolist(),
-            "amostra gdf_quadras[SQ]": gdfq[join_quad].dropna().astype(str).head(5).tolist(),
-        })
 
     st.divider()
 
     # -----------------------------
-    # 2.5) MAPA de Recortes (opcional)
+    # 2.6) MAPA — Recortes (com mesma variável/cores)
     # -----------------------------
     st.markdown("#### Mapa — Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
@@ -1449,18 +1501,16 @@ with tab2:
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
 
-            # interseção por SQ (mantém apenas SQs presentes no recorte, se houver coluna SQ no recorte)
+            # filtrar por SQ do recorte, se existir coluna SQ no recorte
             join_rec = next((c for c in gdf_rec.columns if str(c).upper() == "SQ"), None)
             if join_rec:
                 gdf_rec = gdf_rec.copy()
-                gdf_rec[join_rec] = gdf_rec[join_rec].astype(str).str.strip()
-                sq_keep = set(gdf_rec[join_rec].dropna().astype(str).unique())
-                gdfc_rec = gdfc[gdfc[join_quad].astype(str).isin(sq_keep)].copy()
+                gdf_rec["_SQ_norm"] = gdf_rec[join_rec].apply(_norm_sq_6)
+                sq_keep = set(gdf_rec["_SQ_norm"].dropna().unique().tolist())
+                gdfc_rec = gdfc[gdfc["_SQ_norm"].isin(sq_keep)].copy()
             else:
-                # sem coluna SQ no recorte → apenas desenha o contorno
                 gdfc_rec = gdfc.head(0).copy()
 
-            # pinta o recorte com a mesma lógica de cores/legenda
             layers_rec = []
             if len(gdfc_rec) > 0:
                 gj_rec = make_geojson(gdfc_rec)
@@ -1470,7 +1520,6 @@ with tab2:
                     feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
                 layers_rec.append(render_geojson_layer(gj_rec, name="clusters_recorte"))
 
-            # contorno do recorte
             layers_rec.append(render_line_layer(make_geojson(gdf_rec), name="recorte"))
 
             colRm, colRl = st.columns([4.5, 1], gap="large")
@@ -1489,8 +1538,6 @@ with tab2:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
 
     st.divider()
-
-    
     # ------------------------------------------
     # 2.7 Spearman (pares) — tabela + heatmap
     # ------------------------------------------
@@ -1682,6 +1729,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
