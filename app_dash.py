@@ -26,6 +26,36 @@ st.title(TITLE)
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
+def normalize_repo(owner_repo: str) -> str:
+    s = (owner_repo or "").strip()
+    s = s.replace("https://github.com/", "").replace("http://github.com/", "")
+    s = s.strip("/")
+    parts = [p for p in s.split("/") if p]
+    if len(parts) < 2:
+        raise RuntimeError("Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechClusters'")
+    return f"{parts[0]}/{parts[1]}"
+
+@st.cache_data(show_spinner=True)
+def github_repo_info(owner_repo: str) -> dict:
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
+    return r.json()
+
+def resolve_branch(owner_repo: str, user_branch: str) -> str:
+    """Tenta usar o branch informado; se 404, cai no default_branch do repo."""
+    owner_repo = normalize_repo(owner_repo)
+    b = (user_branch or "").strip()
+    if b:
+        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
+        r = requests.get(url, headers=_gh_headers(), timeout=60)
+        if r.status_code == 200:
+            return b
+    info = github_repo_info(owner_repo)
+    return info.get("default_branch", "main")
+
 def _secret(path, default=None):
     cur = st.secrets
     try:
@@ -318,8 +348,18 @@ def corr_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
 # ==========================
 with st.sidebar:
     st.header("🔗 Fonte dos Dados (GitHub)")
-    repo = st.text_input("owner/repo", value="emiliobneto/UrbanTechClusters")
-    branch = st.text_input("branch", value="main")
+    repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechClusters")
+    branch_input = st.text_input("branch", value="main")
+    
+    # resolvidos (sem espaços/URL e com branch válido)
+    try:
+        repo = normalize_repo(repo_input)
+        branch = resolve_branch(repo, branch_input)
+        st.caption(f"Usando: {repo}@{branch}")
+    except Exception as e:
+        st.error(f"Configuração de repositório inválida: {e}")
+        st.stop()
+
     st.caption("Listagem via GitHub Contents API e download via raw.")
     st.divider()
     st.header("🗺️ Mapbox (opcional)")
@@ -344,13 +384,46 @@ with tab1:
     with colB:
         basemap = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0)
 
+    # --- Carregamento robusto das quadras (com cache e fallback) ---
+
     quadras_path_default = "Data/mapa/quadras.gpkg"
-    gdf_quadras = None
-    first_err = None
-    try:
-        gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
-    except Exception as e:
-        first_err = e
+    
+    # 1) tenta cache
+    gdf_quadras = st.session_state.get("gdf_quadras_cached")
+    
+    if gdf_quadras is None:
+        # 2) tenta caminho padrão
+        first_err = None
+        try:
+            gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
+        except Exception as e:
+            first_err = e
+            # 3) fallback: busca no repositório inteiro por qualquer 'quadras.gpkg'
+            all_paths = github_tree_paths(repo, branch)
+            candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
+            candidates = sorted(
+                candidates,
+                key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p))
+            )
+            if not candidates:
+                st.error(
+                    f"Não encontrei 'quadras.gpkg' no repositório (branch '{branch}'). "
+                    f"Erro ao tentar '{quadras_path_default}': {first_err}"
+                )
+                st.stop()
+    
+            sel_quadras = st.selectbox(
+                "Selecione o arquivo de quadras (.gpkg) detectado no repositório:",
+                candidates,
+                index=0,
+                key="quadras_tab1"
+            )
+            gdf_quadras = load_gpkg(repo, sel_quadras, branch)
+            st.success(f"Carregado: {sel_quadras}")
+    
+        # 4) salva no cache só DEPOIS de obter o GeoDataFrame
+        st.session_state["gdf_quadras_cached"] = gdf_quadras
+
     
     if gdf_quadras is None:
         try:
@@ -514,11 +587,27 @@ with tab2:
     if year:
         df_est = df_est[df_est["Ano"] == year]
 
-    try:
-        gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
-    except Exception as e:
-        st.error(f"Erro carregando Data/mapa/quadras.gpkg: {e}")
-        st.stop()
+    if "gdf_quadras_cached" in st.session_state:
+        gdf_quadras = st.session_state["gdf_quadras_cached"]
+    else:
+        # tenta caminho padrão; se falhar, usa a busca por toda a árvore (mesmo código da Aba 1)
+        quadras_path_default = "Data/mapa/quadras.gpkg"
+        gdf_quadras = None
+        first_err = None
+        try:
+            gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
+        except Exception as e:
+            first_err = e
+        if gdf_quadras is None:
+            all_paths = github_tree_paths(repo, branch)
+            candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
+            candidates = sorted(candidates, key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p)))
+            if not candidates:
+                st.error(f"Não encontrei 'quadras.gpkg'. Erro original: {first_err}")
+                st.stop()
+            sel_quadras = st.selectbox("Selecione o arquivo de quadras (.gpkg):", candidates, index=0, key="quadras_tab2")
+            gdf_quadras = load_gpkg(repo, sel_quadras, branch)
+        st.session_state["gdf_quadras_cached"] = gdf_quadras
 
     join_col_est = "SQ" if "SQ" in df_est.columns else None
     join_col_quad = "SQ" if "SQ" in gdf_quadras.columns else None
@@ -743,6 +832,7 @@ with tab4:
 
     st.subheader("Tabela PCA")
     st.dataframe(dfp, use_container_width=True)
+
 
 
 
