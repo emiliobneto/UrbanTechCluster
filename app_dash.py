@@ -146,6 +146,26 @@ def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv"
                 out.append({"path": f"{path}/{nm}", "name": nm})
     return out
 
+@st.cache_data(show_spinner=True)
+def github_branch_info(owner_repo: str, branch: str) -> dict:
+    """Pega metadados do branch (inclui o SHA do tree raiz)."""
+    url = f"{API_BASE}/repos/{owner_repo}/branches/{branch}"
+    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text}")
+    return r.json()
+
+@st.cache_data(show_spinner=True)
+def github_tree_paths(owner_repo: str, branch: str) -> list[str]:
+    """Lista TODOS os caminhos de arquivo (blobs) do repo/branch (recursivo)."""
+    info = github_branch_info(owner_repo, branch)
+    tree_sha = info["commit"]["commit"]["tree"]["sha"]
+    url = f"{API_BASE}/repos/{owner_repo}/git/trees/{tree_sha}?recursive=1"
+    r = requests.get(url, headers=_gh_headers(), timeout=180)
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
+    tree = r.json().get("tree", [])
+    return [ent["path"] for ent in tree if ent.get("type") == "blob"]
 # ==========================
 # HELPERS: cores e mapas
 # ==========================
@@ -324,11 +344,39 @@ with tab1:
     with colB:
         basemap = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0)
 
+    quadras_path_default = "Data/mapa/quadras.gpkg"
+    gdf_quadras = None
+    first_err = None
     try:
-        gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
+        gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
     except Exception as e:
-        st.error(f"Erro carregando Data/mapa/quadras.gpkg: {e}")
-        st.stop()
+        first_err = e
+    
+    if gdf_quadras is None:
+        try:
+            all_paths = github_tree_paths(repo, branch)
+            candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
+            # Preferir caminhos que contenham /data/ e /mapa/
+            candidates = sorted(
+                candidates,
+                key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p))
+            )
+            if not candidates:
+                st.error(
+                    f"Não encontrei 'quadras.gpkg' no repositório (branch '{branch}'). "
+                    f"Erro ao tentar '{quadras_path_default}': {first_err}"
+                )
+                st.stop()
+            sel_quadras = st.selectbox(
+                "Selecione o arquivo de quadras (.gpkg) detectado no repositório:",
+                candidates,
+                index=0
+            )
+            gdf_quadras = load_gpkg(repo, sel_quadras, branch)
+            st.success(f"Carregado: {sel_quadras}")
+        except Exception as e2:
+            st.error(f"Erro carregando quadras (fallback de busca): {e2}\nErro original: {first_err}")
+            st.stop()
 
     try:
         mapa_files = list_files(repo, "Data/mapa", branch, (".gpkg",))
@@ -695,6 +743,7 @@ with tab4:
 
     st.subheader("Tabela PCA")
     st.dataframe(dfp, use_container_width=True)
+
 
 
 
