@@ -1305,161 +1305,200 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (somente leitura/visualização)  — PATCH ROBUSTO MERGE SQ
+# ABA 2 — Clusterização (somente leitura/visualização) — REWRITE
 # -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Mapa de Clusters + Métricas + Spearman (somente leitura)")
 
-    # 2.1) Clusters (tolerante a variações de diretório/arquivo)
+    # ------------------------------------------
+    # helpers locais
+    # ------------------------------------------
+    def _norm_sq(series):
+        """Normaliza SQ para string comparável: strip, remove .0 final, upper."""
+        s = series.astype(str).str.strip()
+        s = s.str.replace(r"\.0$", "", regex=True)
+        return s.str.upper()
+
+    def _cluster_display_label(v):
+        try:
+            n = int(float(v))
+        except Exception:
+            return str(v)
+        labels = {
+            0: "0 – Ausência de clusterização",
+            1: "1 – Cluster em estágio inicial",
+            2: "2 – Cluster em formação",
+            3: "3 – Clusterizado",
+        }
+        return labels.get(n, str(v))
+
+    # ------------------------------------------
+    # 2.0 Plano de fundo do mapa
+    # ------------------------------------------
+    base_map = st.radio(
+        "Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
+        index=0, horizontal=True, key="clu_base"
+    )
+
+    # ------------------------------------------
+    # 2.1 Carregar arquivo de clusterização
+    # ------------------------------------------
     clusters_dir = pick_existing_dir(
-        repo,
-        branch,
-        ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"],
+        repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
     )
     all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
 
+    # candidatos por nome
     cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
     if not cand:
         cand = [f for f in all_in_dir if re.search(r"(?i)estagio", f["name"]) and re.search(r"(?i)cluster", f["name"])]
-
     if not cand:
-        st.error("Não encontrei arquivo de clusterização em "
-                 f"`{clusters_dir}`. Coloque `EstagioClusterizacao.csv/.parquet` "
-                 "ou um nome contendo 'estagio' e 'cluster'.")
+        st.error(
+            "Não encontrei arquivo de clusterização. "
+            f"Coloque `EstagioClusterizacao.csv`/`.parquet` em `{clusters_dir}` "
+            "ou um arquivo cujo nome contenha 'estagio' e 'cluster'."
+        )
         st.stop()
 
     est_file = cand[0]
-    df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
+    st.caption(f"Clusters: `{est_file['path']}`")
+    df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") \
+             else load_csv(repo, est_file["path"], branch)
 
-    # --- filtro por ano (se houver)
-    years = sorted([int(y) for y in df_est["Ano"].dropna().unique()]) if "Ano" in df_est.columns else []
-    year_sel = st.select_slider("Ano", options=years, value=years[-1], key="clu_ano") if years else None
-    if year_sel is not None:
-        df_est = df_est[df_est["Ano"] == year_sel]
+    # filtro por Ano (se existir)
+    if any(c.lower() == "ano" for c in df_est.columns):
+        ano_col = next(c for c in df_est.columns if c.lower() == "ano")
+        years = sorted([int(y) for y in df_est[ano_col].dropna().unique()])
+        if years:
+            year_sel = st.select_slider("Ano", options=years, value=years[-1], key="clu_ano")
+            df_est = df_est[df_est[ano_col] == year_sel]
+            st.caption(f"Ano selecionado: **{year_sel}**")
+    else:
+        ano_col = None
 
-    # --- escolher coluna de cluster
+    # escolher coluna de cluster
     cluster_cols = [c for c in df_est.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
         st.stop()
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
-    cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
+    cluster_col = st.selectbox(
+        "Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col"
+    )
 
-    # 2.2) Carregar quadras (cache da aba 1 ou fallback)
+    # ------------------------------------------
+    # 2.2 Carregar quadras e fazer merge por SQ (normalizado)
+    # ------------------------------------------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
             gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
             st.session_state["gdf_quadras_cached"] = gdf_quadras
         except Exception as e:
-            st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
+            st.error(f"Não foi possível carregar `Data/mapa/quadras.gpkg`. Detalhe: {e}")
             st.stop()
 
-    # 2.3) DETECÇÃO + NORMALIZAÇÃO DA CHAVE SQ (corrige ValueError do merge)
+    # detectar colunas SQ (case-insensitive)
     join_est = next((c for c in df_est.columns if str(c).upper() == "SQ"), None)
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not (join_est and join_quad):
-        st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ'.")
+        st.error("Tanto a tabela de clusters quanto as quadras precisam ter a coluna 'SQ' (qualquer caixa).")
         st.stop()
 
-    def _normalize_sq_for_merge(s: pd.Series):
-        # tenta numérico
-        num = pd.to_numeric(s, errors="coerce")
-        ratio = float(num.notna().mean())
-        if ratio >= 0.8:
-            return num.astype("Int64"), "Int64", ratio
-        # fallback: string limpa
-        s_str = s.astype(str).str.strip().str.replace(r"\.0$", "", regex=True).str.upper()
-        return s_str, "str", ratio
+    # merge robusto por chave normalizada
+    dfe = df_est[[join_est, cluster_col]].copy()
+    dfe["_key_sq"] = _norm_sq(dfe[join_est])
+    gdfc = gdf_quadras.copy()
+    gdfc["_key_sq"] = _norm_sq(gdfc[join_quad])
+    gdfc = gdfc.merge(dfe[["_key_sq", cluster_col]], on="_key_sq", how="left")
 
-    # cria colunas temporárias para merge
-    gdf_quadras["__SQ_MERGE_L"], kind_l, ratio_l = _normalize_sq_for_merge(gdf_quadras[join_quad])
-    df_est["__SQ_MERGE_R"],  kind_r, ratio_r  = _normalize_sq_for_merge(df_est[join_est])
-
-    # se os "kinds" divergirem, força ambos para string
-    if kind_l != kind_r:
-        gdf_quadras["__SQ_MERGE_L"] = gdf_quadras["__SQ_MERGE_L"].astype(str)
-        df_est["__SQ_MERGE_R"]      = df_est["__SQ_MERGE_R"].astype(str)
-        kind = "str"
-    else:
-        kind = kind_l
-
-    # Debug da junção
-    with st.expander("🔧 Debug da junção por SQ", expanded=False):
-        st.write({
-            "clusters_dir": clusters_dir,
-            "arquivo_clusters": est_file["path"],
-            "join_quad_col": join_quad,
-            "join_est_col": join_est,
-            "tipo_left": str(gdf_quadras[join_quad].dtype),
-            "tipo_right": str(df_est[join_est].dtype),
-            "merge_kind": kind,
-            "conv_ratio_left(>=0.8->num)": round(ratio_l, 3),
-            "conv_ratio_right(>=0.8->num)": round(ratio_r, 3),
-        })
-        st.write("amostra SQ quadras:", gdf_quadras[join_quad].dropna().astype(str).head(5).tolist())
-        st.write("amostra SQ clusters:", df_est[join_est].dropna().astype(str).head(5).tolist())
-
-    # 2.4) MERGE seguro
-    right_cols = ["__SQ_MERGE_R", cluster_col]
-    gdfc = gdf_quadras.merge(
-        df_est[right_cols],
-        left_on="__SQ_MERGE_L",
-        right_on="__SQ_MERGE_R",
-        how="left",
-    ).drop(columns=["__SQ_MERGE_L", "__SQ_MERGE_R"])
-
-    # 2.5) Mapa categórico por cluster
+    # ------------------------------------------
+    # 2.3 Cores + tooltip + legenda com rótulos humanos
+    # ------------------------------------------
     cats = gdfc[cluster_col].dropna().unique().tolist()
     try:
         cats_sorted = sorted(cats, key=lambda x: float(x))
     except Exception:
         cats_sorted = sorted(cats, key=lambda x: str(x))
+
     palette = pick_categorical(len(cats_sorted))
     cmap = {cat: palette[i] for i, cat in enumerate(cats_sorted)}
+    legend_labels = {cat: _cluster_display_label(cat) for cat in cats_sorted}
 
+    # valores p/ cor e tooltip
     gdfc["value"] = gdfc[cluster_col]
+    gdfc["label"] = gdfc[cluster_col].apply(_cluster_display_label)
+
     gj = make_geojson(gdfc)
     for feat in gj.get("features", []):
-        val = feat.get("properties", {}).get("value", None)
+        props = feat.setdefault("properties", {})
+        val = props.get("value", None)
         hexc = cmap.get(val, "#999999")
-        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+        props["fill_color"] = hex_to_rgba(hexc)
+        props.setdefault("name", props.get("label", legend_labels.get(val, str(val))))
 
+    # ------------------------------------------
+    # 2.4 Mapa principal
+    # ------------------------------------------
     colM, colL = st.columns([4, 1], gap="large")
     with colM:
         st.markdown("#### Mapa — Clusters por SQ")
-        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
-                            index=0, horizontal=True, key="clu_base")
         if base_map.startswith("Satélite"):
             deck([render_geojson_layer(gj, name="clusters")], satellite=True)
         else:
             osm_basemap_deck([render_geojson_layer(gj, name="clusters")])
     with colL:
         st.markdown(f"**Legenda — {cluster_col}**")
-        for k in cats_sorted:
-            _legend_row(cmap[k], str(k))
+        for cat in cats_sorted:
+            _legend_row(cmap[cat], legend_labels[cat])
 
-    # -----------------------------
-    # 2.6) Recortes (opcional)
-    # -----------------------------
+    st.divider()
+
+    # ------------------------------------------
+    # 2.5 Recorte (opcional): filtra e pinta somente SQ do recorte
+    # ------------------------------------------
     st.markdown("#### Mapa — Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
     try:
         rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
         if rec_files:
-            rec_sel = st.selectbox("Arquivo de recorte", [f["name"] for f in rec_files], index=0, key="clu_rec_file")
+            rec_sel = st.selectbox(
+                "Arquivo de recorte (.gpkg)", [f["name"] for f in rec_files],
+                index=0, key="clu_rec_file"
+            )
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
+            st.caption(f"Recorte: `{rec_obj['path']}`")
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-            layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
+
+            # filtra gdfc pelos polígonos do recorte (intersects)
+            try:
+                import geopandas as gpd
+                gdfc_f = gdfc.to_crs(gdf_rec.crs) if gdfc.crs != gdf_rec.crs else gdfc
+                # sjoin pode ser pesado; usar unary_union é mais leve para um único filtro
+                union_geom = gdf_rec.unary_union
+                gdf_clip = gdfc_f[gdfc_f.geometry.intersects(union_geom)]
+            except Exception:
+                gdf_clip = gdfc.copy()  # fallback: sem filtro
+
+            # geojson e mapa do recorte
+            gj_clip = make_geojson(gdf_clip)
+            for feat in gj_clip.get("features", []):
+                props = feat.setdefault("properties", {})
+                val = props.get("value", None)
+                hexc = cmap.get(val, "#999999")
+                props["fill_color"] = hex_to_rgba(hexc)
+                props.setdefault("name", props.get("label", legend_labels.get(val, str(val))))
+
             colRm, colRl = st.columns([4, 1], gap="large")
             with colRm:
                 if base_map.startswith("Satélite"):
-                    deck(layers_rec, satellite=True)
+                    deck([render_geojson_layer(gj_clip, "recorte_clusters")], satellite=True)
                 else:
-                    osm_basemap_deck(layers_rec)
+                    osm_basemap_deck([render_geojson_layer(gj_clip, "recorte_clusters")])
             with colRl:
                 st.markdown("**Legenda — Recorte**")
-                _legend_row("#444444", "Contorno do recorte")
+                for cat in cats_sorted:
+                    _legend_row(cmap[cat], legend_labels[cat])
         else:
             st.caption(f"Pasta `{rec_dir}` vazia.")
     except Exception as e:
@@ -1467,32 +1506,41 @@ with tab2:
 
     st.divider()
 
-    # -----------------------------
-    # 2.7) Métricas por cluster/ano (mesmo código anterior)
-    # -----------------------------
+    # ------------------------------------------
+    # 2.6 Métricas por cluster/ano (arquivos prontos)
+    # ------------------------------------------
     st.subheader("Métricas por cluster/ano")
-    versao = st.radio("Versão de análise", ["originais", "winsorizados"], index=0, horizontal=True, key="clu_ver")
+    versao = st.radio(
+        "Versão de análise", ["originais", "winsorizados"], index=0, horizontal=True, key="clu_ver"
+    )
     base_metrics = (
         pick_existing_dir(repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"])
-        if versao == "originais" else
-        pick_existing_dir(repo, branch, ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"])
+        if versao == "originais"
+        else pick_existing_dir(repo, branch, ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"])
     )
 
-    met_files = [f for f in list_files(repo, base_metrics, branch, (".parquet", ".csv")) if f["name"].lower() in ("metricas.parquet","metricas.csv")]
-    if not met_files:
-        met_files = [f for f in list_files(repo, base_metrics, branch, (".parquet",".csv")) if re.search(r"(?i)metrica|metrics", f["name"])]
+    met_files = [
+        f for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
+        if f["name"].lower() in ("metricas.parquet", "metricas.csv")
+    ] or [
+        f for f in list_files(repo, base_metrics, branch, (".parquet", ".csv"))
+        if re.search(r"(?i)metrica|metrics", f["name"])
+    ]
 
     if met_files:
         met_files = sorted(met_files, key=lambda f: 0 if f["name"].lower().endswith(".parquet") else 1)
         sel_met = st.selectbox("Arquivo de métricas", [f["name"] for f in met_files], index=0, key="clu_metrics_file")
         met_obj = next(x for x in met_files if x["name"] == sel_met)
-        dfm = load_parquet(repo, met_obj["path"], branch) if met_obj["name"].endswith(".parquet") else load_csv(repo, met_obj["path"], branch)
+        st.caption(f"Métricas: `{met_obj['path']}`")
+        dfm = load_parquet(repo, met_obj["path"], branch) if met_obj["name"].endswith(".parquet") \
+              else load_csv(repo, met_obj["path"], branch)
 
-        if "Ano" in dfm.columns:
-            years_m = sorted([int(y) for y in dfm["Ano"].dropna().unique()])
+        if any(c.lower() == "ano" for c in dfm.columns):
+            ano_m = next(c for c in dfm.columns if c.lower() == "ano")
+            years_m = sorted([int(y) for y in dfm[ano_m].dropna().unique()])
             if years_m:
                 year_m = st.select_slider("Ano (tabela)", options=years_m, value=years_m[-1], key="clu_met_ano")
-                dfm = dfm[dfm["Ano"] == year_m]
+                dfm = dfm[dfm[ano_m] == year_m]
 
         cl_cols = [c for c in dfm.columns if re.search(r"(?i)(cluster|estagio|label)", c)]
         if cl_cols:
@@ -1502,50 +1550,80 @@ with tab2:
                 dfm = dfm[dfm[cl_cols[0]].isin(cl_sel)]
 
         st.dataframe(dfm, use_container_width=True)
+        # export CSV
+        try:
+            st.download_button("⬇️ Baixar métricas (CSV)", dfm.to_csv(index=False).encode("utf-8"), file_name="metricas_filtrado.csv", mime="text/csv", key="dl_metricas")
+        except Exception:
+            pass
     else:
         st.info(f"Não encontrei 'metricas.csv'/'metricas.parquet' em `{base_metrics}`.")
 
     st.divider()
 
-    # -----------------------------
-    # 2.8) Spearman (pares) — tabela + heatmap (código anterior)
-    # -----------------------------
+    # ------------------------------------------
+    # 2.7 Spearman (pares) — tabela + heatmap
+    # ------------------------------------------
     st.subheader("Spearman (pares) — tabela e heatmap")
     base_sp = pick_existing_dir(repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"])
     df_sp = None
-    sp_candidates = [f for f in list_files(repo, base_sp, branch, (".csv", ".parquet")) if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())]
+    sp_candidates = [
+        f for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
+        if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
+    ]
     if not sp_candidates:
         base_sp_alt = pick_existing_dir(repo, branch, ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"])
-        sp_candidates = [f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet")) if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())]
+        sp_candidates = [
+            f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet"))
+            if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
+        ]
 
     if sp_candidates:
         sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])
         sp_sel = st.selectbox("Selecione arquivo Spearman (pares)", [f["name"] for f in sp_candidates], index=0, key="clu_spearman_sel")
         sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
-        df_sp = load_parquet(repo, sp_obj["path"], branch) if sp_obj["name"].endswith(".parquet") else load_csv(repo, sp_obj["path"], branch)
+        st.caption(f"Spearman: `{sp_obj['path']}`")
+        df_sp = load_parquet(repo, sp_obj["path"], branch) if sp_obj["name"].endswith(".parquet") \
+                else load_csv(repo, sp_obj["path"], branch)
         spearman_title = sp_obj["name"]
 
     if df_sp is not None:
         st.markdown(f"**Tabela — {spearman_title}**")
         st.dataframe(df_sp, use_container_width=True)
+
         import re as _re
         cand_i = next((c for c in df_sp.columns if _re.search(r"(var|col).*a$", c.lower())), None)
         cand_j = next((c for c in df_sp.columns if _re.search(r"(var|col).*b$", c.lower())), None)
         cand_r = next((c for c in df_sp.columns if any(k in c.lower() for k in ["rho","spearman","corr","coef"])), None)
         if not (cand_i and cand_j and cand_r):
             text_cols = [c for c in df_sp.columns if not pd.api.types.is_numeric_dtype(df_sp[c])]
-            num_cols  = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
+            num_cols = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
             if len(text_cols) >= 2 and num_cols:
                 cand_i, cand_j, cand_r = text_cols[0], text_cols[1], num_cols[0]
+
         if cand_i and cand_j and cand_r:
             M = df_sp.pivot_table(index=cand_i, columns=cand_j, values=cand_r, aggfunc="mean")
-            M = M.combine_first(M.T); M = np.maximum(M, M.T)
-            fig = px.imshow(M, text_auto=False, color_continuous_scale="Inferno", title="Heatmap — Spearman (pares → matriz)")
+            M = M.combine_first(M.T)
+            M = np.maximum(M, M.T)
+            fig = px.imshow(M, text_auto=False, color_continuous_scale="Inferno",
+                            title="Heatmap — Spearman (pares → matriz)")
             st.plotly_chart(fig, use_container_width=True)
+            # download PNG (se kaleido disponível) e CSV
+            try:
+                import plotly.io as pio
+                png = pio.to_image(fig, format="png", scale=3)  # ~300dpi
+                st.download_button("⬇️ Baixar heatmap (PNG)", png, file_name="spearman_heatmap.png", mime="image/png", key="dl_spear_png")
+            except Exception:
+                pass
+            try:
+                st.download_button("⬇️ Baixar matriz (CSV)", pd.DataFrame(M).to_csv().encode("utf-8"),
+                                   file_name="spearman_matrix.csv", mime="text/csv", key="dl_spear_csv")
+            except Exception:
+                pass
         else:
             st.caption("Não consegui identificar as colunas para montar o heatmap automaticamente.")
     else:
         st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
+
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas (somente leitura/exibição)
@@ -1635,6 +1713,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
