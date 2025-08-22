@@ -1199,7 +1199,6 @@ with tab1:
         }
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
-
 # -----------------------------------------------------------------------------
 # ABA 2 — Clusterização (somente leitura/visualização)
 # -----------------------------------------------------------------------------
@@ -1567,6 +1566,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
