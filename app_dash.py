@@ -154,157 +154,157 @@ with tab1:
             ],
         )
         # Listagem de arquivos .parquet (com opção de incluir/excluir predições)
-    parquets_all = list_files(repo, base_dir, branch, (".parquet",))
-    incl_pred = st.checkbox("Incluir arquivos de predição (pred_*)", value=True, key="main_incl_pred")
-    parquet_files = [
-        f for f in parquets_all
-        if incl_pred or not f["name"].lower().startswith("pred_")
-    ]
-    if not parquet_files:
-        st.warning(f"Nenhum .parquet encontrado em {base_dir}.")
-        st.stop()
-    
-    sel_file = st.selectbox(
-        "Arquivo .parquet com variáveis",
-        [f["name"] for f in parquet_files],
-        key="main_varfile",
-    )
-    fobj = next(x for x in parquet_files if x["name"] == sel_file)
-    df_vars = load_parquet(repo, fobj["path"], branch)
-    
-        with col2:
-            # Detecta coluna SQ (case-insensitive)
-            join_col = next((c for c in df_vars.columns if str(c).upper() == "SQ"), None)
-            if join_col is None:
-                st.error("Dataset selecionado não possui coluna 'SQ'.")
-                st.stop()
-            # Detecta coluna de ano (case-insensitive)
-            years_col = next((c for c in df_vars.columns if str(c).lower() in ("ano", "year")), None)
-            years = (
-                sorted([int(y) for y in df_vars[years_col].dropna().unique()]) if years_col else []
-            )
-            year = (
-                st.select_slider("Ano", options=years, value=years[-1], key="main_ano") if years else None
-            )
-            if year is not None and years_col:
-                df_vars = df_vars[df_vars[years_col] == year]
-    
-        with col3:
-            # Variáveis candidatas: numéricas e que NÃO são id/tempo
-            id_like = {c for c in df_vars.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
-            time_like = {c for c in df_vars.columns if str(c).lower() in {"ano", "year"}}
-            ignore_cols = id_like | time_like
-            num_cols = [c for c in df_vars.columns if pd.api.types.is_numeric_dtype(df_vars[c])]
-            var_options = [c for c in num_cols if c not in ignore_cols]
-            if not var_options:
-                var_options = [c for c in df_vars.columns if c not in ignore_cols]
-            var_sel = st.selectbox("Variável a mapear", var_options, key="main_varname")
-            n_classes = st.slider("Quebras (Jenks)", min_value=4, max_value=8, value=6, key="main_jenks")
-    
-        # merge com quadras
-        sq_col_quadras = (
-            "SQ" if "SQ" in gdf_quadras.columns else next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
-        )
-        if not sq_col_quadras:
-            st.error("Camada de quadras não possui coluna 'SQ'.")
+        parquets_all = list_files(repo, base_dir, branch, (".parquet",))
+        incl_pred = st.checkbox("Incluir arquivos de predição (pred_*)", value=True, key="main_incl_pred")
+        parquet_files = [
+            f for f in parquets_all
+            if incl_pred or not f["name"].lower().startswith("pred_")
+        ]
+        if not parquet_files:
+            st.warning(f"Nenhum .parquet encontrado em {base_dir}.")
             st.stop()
-        gdf = gdf_quadras.merge(
-            df_vars[[join_col, var_sel]], left_on=sq_col_quadras, right_on=join_col, how="left"
+        
+        sel_file = st.selectbox(
+            "Arquivo .parquet com variáveis",
+            [f["name"] for f in parquet_files],
+            key="main_varfile",
         )
-    
-        # classificação + legenda
-        series = gdf[var_sel]
-        if is_categorical(series):
-            cats = [c for c in series.dropna().unique()]
-            palette = pick_categorical(len(cats))
-            try:
-                cats_sorted = sorted(cats, key=lambda x: float(x))
-            except Exception:
-                cats_sorted = sorted(cats, key=lambda x: str(x))
-            cmap = {cat: palette[i] for i, cat in enumerate(cats_sorted)}
-            gdf["value"] = series
-            legend_kind = "categorical"
-            legend_info = cmap
-        else:
-            import mapclassify as mc
-    
-            vals = series.dropna().astype(float).values
-            uniq = np.unique(vals)
-            k = max(4, min(8, n_classes))
-            if len(uniq) < max(4, k):
-                k = min(len(uniq), max(2, k))
-            nb = mc.NaturalBreaks(vals, k=k, initial=200)
-            bins = [-float("inf")] + list(nb.bins)
-            binned = pd.cut(series, bins=bins, labels=False, include_lowest=True)
-            gdf["value"] = binned
-            palette = pick_sequential(k)
-            cmap = {i: palette[i] for i in range(len(palette))}
-            legend_kind = "numeric"
-            legend_info = (bins, palette)
-    
-        geojson = make_geojson(gdf)
-        for feat in geojson.get("features", []):
-            val = feat.get("properties", {}).get("value", None)
-            hexc = cmap.get(val, "#999999") if legend_kind == "numeric" else legend_info.get(val, "#999999")
-            feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
-    
-        layers = [render_geojson_layer(geojson, name="quadras")]
-        for nm, g in loaded_layers:
-            gj = make_geojson(g)
-            try:
-                geoms = set(g.geometry.geom_type.unique())
-            except Exception:
-                geoms = {"Polygon"}
-            if geoms <= {"LineString", "MultiLineString"}:
-                layers.append(render_line_layer(gj, nm))
-            elif geoms <= {"Point", "MultiPoint"}:
-                layers.append(render_point_layer(gj, nm))
-            else:
-                layers.append(render_geojson_layer(gj, nm))
-    
-        st.markdown("#### Mapa — Quadras + Camadas auxiliares")
-        map_col, legend_col = st.columns([4, 1], gap="large")
-        with map_col:
-            if basemap.startswith("Satélite"):
-                deck(layers, satellite=True)
-            else:
-                osm_basemap_deck(layers)
-        with legend_col:
-            if legend_kind == "categorical":
-                render_legend_categorical(legend_info, title=f"Legenda — {var_sel}")
-            elif legend_kind == "numeric":
-                bins, palette = legend_info
-                render_legend_numeric(bins, palette, title=f"Legenda — {var_sel}")
-            else:
-                st.caption("Sem legenda.")
-    
-        # Recortes
-        st.subheader("Recortes espaciais (GPKG)")
-        st.caption("Seleciona GPKGs em `Data/mapa/recortes` (com fallback por busca).")
+        fobj = next(x for x in parquet_files if x["name"] == sel_file)
+        df_vars = load_parquet(repo, fobj["path"], branch)
+
+    with col2:
+        # Detecta coluna SQ (case-insensitive)
+        join_col = next((c for c in df_vars.columns if str(c).upper() == "SQ"), None)
+        if join_col is None:
+            st.error("Dataset selecionado não possui coluna 'SQ'.")
+            st.stop()
+        # Detecta coluna de ano (case-insensitive)
+        years_col = next((c for c in df_vars.columns if str(c).lower() in ("ano", "year")), None)
+        years = (
+            sorted([int(y) for y in df_vars[years_col].dropna().unique()]) if years_col else []
+        )
+        year = (
+            st.select_slider("Ano", options=years, value=years[-1], key="main_ano") if years else None
+        )
+        if year is not None and years_col:
+            df_vars = df_vars[df_vars[years_col] == year]
+
+    with col3:
+        # Variáveis candidatas: numéricas e que NÃO são id/tempo
+        id_like = {c for c in df_vars.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
+        time_like = {c for c in df_vars.columns if str(c).lower() in {"ano", "year"}}
+        ignore_cols = id_like | time_like
+        num_cols = [c for c in df_vars.columns if pd.api.types.is_numeric_dtype(df_vars[c])]
+        var_options = [c for c in num_cols if c not in ignore_cols]
+        if not var_options:
+            var_options = [c for c in df_vars.columns if c not in ignore_cols]
+        var_sel = st.selectbox("Variável a mapear", var_options, key="main_varname")
+        n_classes = st.slider("Quebras (Jenks)", min_value=4, max_value=8, value=6, key="main_jenks")
+
+    # merge com quadras
+    sq_col_quadras = (
+        "SQ" if "SQ" in gdf_quadras.columns else next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
+    )
+    if not sq_col_quadras:
+        st.error("Camada de quadras não possui coluna 'SQ'.")
+        st.stop()
+    gdf = gdf_quadras.merge(
+        df_vars[[join_col, var_sel]], left_on=sq_col_quadras, right_on=join_col, how="left"
+    )
+
+    # classificação + legenda
+    series = gdf[var_sel]
+    if is_categorical(series):
+        cats = [c for c in series.dropna().unique()]
+        palette = pick_categorical(len(cats))
         try:
-            rec_dir = pick_existing_dir(
-                repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"]
+            cats_sorted = sorted(cats, key=lambda x: float(x))
+        except Exception:
+            cats_sorted = sorted(cats, key=lambda x: str(x))
+        cmap = {cat: palette[i] for i, cat in enumerate(cats_sorted)}
+        gdf["value"] = series
+        legend_kind = "categorical"
+        legend_info = cmap
+    else:
+        import mapclassify as mc
+
+        vals = series.dropna().astype(float).values
+        uniq = np.unique(vals)
+        k = max(4, min(8, n_classes))
+        if len(uniq) < max(4, k):
+            k = min(len(uniq), max(2, k))
+        nb = mc.NaturalBreaks(vals, k=k, initial=200)
+        bins = [-float("inf")] + list(nb.bins)
+        binned = pd.cut(series, bins=bins, labels=False, include_lowest=True)
+        gdf["value"] = binned
+        palette = pick_sequential(k)
+        cmap = {i: palette[i] for i in range(len(palette))}
+        legend_kind = "numeric"
+        legend_info = (bins, palette)
+
+    geojson = make_geojson(gdf)
+    for feat in geojson.get("features", []):
+        val = feat.get("properties", {}).get("value", None)
+        hexc = cmap.get(val, "#999999") if legend_kind == "numeric" else legend_info.get(val, "#999999")
+        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+
+    layers = [render_geojson_layer(geojson, name="quadras")]
+    for nm, g in loaded_layers:
+        gj = make_geojson(g)
+        try:
+            geoms = set(g.geometry.geom_type.unique())
+        except Exception:
+            geoms = {"Polygon"}
+        if geoms <= {"LineString", "MultiLineString"}:
+            layers.append(render_line_layer(gj, nm))
+        elif geoms <= {"Point", "MultiPoint"}:
+            layers.append(render_point_layer(gj, nm))
+        else:
+            layers.append(render_geojson_layer(gj, nm))
+
+    st.markdown("#### Mapa — Quadras + Camadas auxiliares")
+    map_col, legend_col = st.columns([4, 1], gap="large")
+    with map_col:
+        if basemap.startswith("Satélite"):
+            deck(layers, satellite=True)
+        else:
+            osm_basemap_deck(layers)
+    with legend_col:
+        if legend_kind == "categorical":
+            render_legend_categorical(legend_info, title=f"Legenda — {var_sel}")
+        elif legend_kind == "numeric":
+            bins, palette = legend_info
+            render_legend_numeric(bins, palette, title=f"Legenda — {var_sel}")
+        else:
+            st.caption("Sem legenda.")
+
+    # Recortes
+    st.subheader("Recortes espaciais (GPKG)")
+    st.caption("Seleciona GPKGs em `Data/mapa/recortes` (com fallback por busca).")
+    try:
+        rec_dir = pick_existing_dir(
+            repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"]
+        )
+        recorte_files = list_files(repo, rec_dir, branch, (".gpkg",))
+        if not recorte_files:
+            st.info("Nenhum GPKG de recorte encontrado.")
+        else:
+            rec_sel = st.selectbox(
+                "Arquivo de recorte", [f["path"] for f in recorte_files], index=0, key="main_rec_file"
             )
-            recorte_files = list_files(repo, rec_dir, branch, (".gpkg",))
-            if not recorte_files:
-                st.info("Nenhum GPKG de recorte encontrado.")
-            else:
-                rec_sel = st.selectbox(
-                    "Arquivo de recorte", [f["path"] for f in recorte_files], index=0, key="main_rec_file"
-                )
-                gdf_rec = load_gpkg(repo, rec_sel, branch)
-                layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
-                st.markdown("#### Mapa — Recorte selecionado")
-                col_m, col_l = st.columns([4, 1], gap="large")
-                with col_m:
-                    deck(layers_rec, satellite=basemap.startswith("Satélite"))
-                with col_l:
-                    st.markdown("**Legenda — Recorte**")
-                    from app_core import _legend_row
-    
-                    _legend_row("#444444", "Contorno do recorte")
-        except Exception as e:
-            st.warning(f"Não foi possível listar/ler recortes: {e}")
+            gdf_rec = load_gpkg(repo, rec_sel, branch)
+            layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
+            st.markdown("#### Mapa — Recorte selecionado")
+            col_m, col_l = st.columns([4, 1], gap="large")
+            with col_m:
+                deck(layers_rec, satellite=basemap.startswith("Satélite"))
+            with col_l:
+                st.markdown("**Legenda — Recorte**")
+                from app_core import _legend_row
+
+                _legend_row("#444444", "Contorno do recorte")
+    except Exception as e:
+        st.warning(f"Não foi possível listar/ler recortes: {e}")
 
 # -----------------------------------------------------------------------------
 # ABA 2 — Clusterização (somente leitura/visualização)
@@ -674,4 +674,3 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
-
