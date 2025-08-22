@@ -829,19 +829,18 @@ if not repo or not branch:
 tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"])
 
 # -----------------------------------------------------------------------------
-# ABA 1 — Principal (mapa + dados por SQ + recortes)
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 # ABA 1 — Principal (mapa + dados por SQ + recortes) — VERSÃO REESCRITA
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ABA 1 — Principal (mapa + dados por SQ + recortes) — AJUSTADA
+# -----------------------------------------------------------------------------
 with tab1:
-    # ---------------- Helpers locais (evitam colisões com outras abas) ----------------
+    # ---------------- Helpers locais ----------------
     def _t1_download_df(df: pd.DataFrame, base_name: str):
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Baixar CSV", csv, file_name=f"{base_name}.csv", mime="text/csv", key=f"t1_dl_{base_name}")
 
     def _t1_png_mapa_300dpi(gdf_pol, value_col, cmap_dict, gdf_overlay=None, titulo=None, dpi=300):
-        """Gera PNG de mapa temático em alta resolução (300dpi) via matplotlib."""
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(10, 10), dpi=dpi)
         # plota por classe/categoria
@@ -851,10 +850,9 @@ with tab1:
                 try:
                     sub.plot(ax=ax, color=hexc, linewidth=0, edgecolor="none")
                 except Exception:
-                    # fallback se houver geometria inválida
                     sub = sub.buffer(0)
                     sub.plot(ax=ax, color=hexc, linewidth=0, edgecolor="none")
-        if gdf_overlay is not None:
+        if gdf_overlay is not None and not gdf_overlay.empty:
             try:
                 gdf_overlay.boundary.plot(ax=ax, linewidth=1)
             except Exception:
@@ -904,8 +902,7 @@ with tab1:
         st.stop()
 
     # ---------------- Camadas auxiliares (opcional) ----------------
-    loaded_layers = []
-    other_layers_paths = []
+    loaded_layers, other_layers_paths = [], []
     try:
         mapa_dir = pick_existing_dir(repo, branch, ["Data/mapa", "data/mapa", "Data/Mapa"])
         mapa_files = list_files(repo, mapa_dir, branch, (".gpkg",))
@@ -920,7 +917,7 @@ with tab1:
     except Exception as e:
         st.warning(f"Não foi possível listar/ler camadas em Data/mapa: {e}")
 
-    # ---------------- Dados por SQ — seleção de fonte/arquivo/variável/ano ----------------
+    # ---------------- Dados por SQ — seleção de fonte/arquivo/ano ----------------
     st.subheader("Dados por `SQ` para espacialização")
     col1, col2, col3 = st.columns([1.6, 1, 1.2], gap="large")
 
@@ -956,37 +953,72 @@ with tab1:
         if year is not None and years_col:
             df_vars = df_vars[df_vars[years_col] == year]
 
-    with col3:
-        id_like = {c for c in df_vars.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
-        time_like = {c for c in df_vars.columns if str(c).lower() in {"ano", "year"}}
-        ignore_cols = id_like | time_like
-        num_cols = [c for c in df_vars.columns if pd.api.types.is_numeric_dtype(df_vars[c])]
-        var_options = [c for c in num_cols if c not in ignore_cols] or [c for c in df_vars.columns if c not in ignore_cols]
-        var_sel = st.selectbox("Variável a mapear", var_options, key="t1_varname")
-        n_classes = st.slider("Quebras (Jenks)", min_value=4, max_value=8, value=6, key="t1_jenks")
+    # ---------------- Definição da variável e do modo de coloração (3ª coluna) ----------------
+    # Regra:
+    # - Se a 3ª coluna for 'str':
+    #     * Se tiver 1 único valor (ex.: "pred_renda") e existir uma coluna numérica com esse nome => usar essa coluna numérica
+    #     * Caso contrário => usar a própria 3ª coluna como classificação (categórica) e montar a legenda a partir dela
+    # - Fallback: escolher manualmente uma variável numérica
+    third_col = df_vars.columns[2] if len(df_vars.columns) >= 3 else None
+    color_mode = "fallback_numeric"   # "classification_str" | "numeric_from_flag" | "fallback_numeric"
+    var_label_for_legend = None       # Título/descrição na legenda
+
+    # candidatos numéricos pro fallback
+    id_like = {c for c in df_vars.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
+    time_like = {c for c in df_vars.columns if str(c).lower() in {"ano", "year"}}
+    ignore_cols = id_like | time_like
+    num_cols_all = [c for c in df_vars.columns if pd.api.types.is_numeric_dtype(df_vars[c])]
+    var_options_numeric = [c for c in num_cols_all if c not in ignore_cols] or [c for c in df_vars.columns if c not in ignore_cols]
+
+    # tentativa automática
+    if third_col is not None and (df_vars[third_col].dtype.kind in ("O", "U", "S")):
+        uniq_vals = df_vars[third_col].dropna().unique().tolist()
+        if len(uniq_vals) == 1 and str(uniq_vals[0]) in df_vars.columns and pd.api.types.is_numeric_dtype(df_vars[str(uniq_vals[0])]):
+            # 3ª coluna contém o nome da variável numérica a usar
+            var_sel = str(uniq_vals[0])
+            color_mode = "numeric_from_flag"
+            var_label_for_legend = var_sel
+        else:
+            # 3ª coluna é uma classificação por SQ (categórica)
+            color_mode = "classification_str"
+            var_sel = third_col  # será usada diretamente para pintar
+            var_label_for_legend = f"{third_col} (classificação)"
+    else:
+        # fallback manual
+        var_sel = st.selectbox("Variável numérica a mapear (fallback)", var_options_numeric, key="t1_varname_fallback")
+        color_mode = "fallback_numeric"
+        var_label_for_legend = var_sel
+
+    # Para numeric modes: número de classes (Jenks → fallback quantis)
+    n_classes = None
+    if color_mode in ("numeric_from_flag", "fallback_numeric"):
+        col3.write("")  # só para manter o grid
+        n_classes = col3.slider("Quebras (Jenks)", min_value=4, max_value=8, value=6, key="t1_jenks")
 
     # ---------------- Merge com quadras ----------------
     gdf = gdf_quadras.merge(df_vars[[join_col, var_sel]], left_on=sq_col_quadras, right_on=join_col, how="left")
 
-    # ---------------- Classificação (Jenks → fallback quantis) ----------------
-    series = gdf[var_sel]
+    # ---------------- Classificação e legenda ----------------
     legend_kind, legend_info, cmap = None, None, None
-
-    if is_categorical(series):
+    if color_mode == "classification_str":
+        # Usar diretamente os rótulos da 3ª coluna
+        series = gdf[var_sel].astype("string")
         cats = [c for c in series.dropna().unique()]
         try:
-            cats_sorted = sorted(cats, key=lambda x: float(x))
-        except Exception:
             cats_sorted = sorted(cats, key=lambda x: str(x))
+        except Exception:
+            cats_sorted = cats
         palette = pick_categorical(len(cats_sorted))
         cmap = {cat: palette[i] for i, cat in enumerate(cats_sorted)}
         gdf["value"] = series
         legend_kind = "categorical"
         legend_info = cmap
     else:
-        vals = series.dropna().astype(float).values
+        # numeric_from_flag ou fallback_numeric
+        series = gdf[var_sel].astype(float)
+        vals = series.dropna().values
         uniq = np.unique(vals)
-        k = max(4, min(8, n_classes))
+        k = max(4, min(8, n_classes if n_classes else 6))
         if len(uniq) < max(4, k):
             k = min(len(uniq), max(2, k))
         try:
@@ -1001,18 +1033,14 @@ with tab1:
             legend_info = (bins, palette)
         except Exception:
             # Fallback: quantis
-            try:
-                labels = list(range(k))
-                binned, bins = pd.qcut(series, q=k, labels=labels, retbins=True, duplicates="drop")
-                binned = pd.Series(binned, index=series.index).astype("float").astype("Int64")
-                gdf["value"] = binned
-                palette = pick_sequential(len(np.unique(binned.dropna())))
-                cmap = {i: palette[i] for i in range(len(palette))}
-                legend_kind = "numeric"
-                legend_info = (bins, palette)
-            except Exception as e:
-                st.error(f"Falha na classificação dos valores ({e}).")
-                st.stop()
+            labels = list(range(k))
+            binned, bins = pd.qcut(series, q=k, labels=labels, retbins=True, duplicates="drop")
+            binned = pd.Series(binned, index=series.index).astype("float").astype("Int64")
+            gdf["value"] = binned
+            palette = pick_sequential(len(np.unique(binned.dropna())))
+            cmap = {i: palette[i] for i in range(len(palette))}
+            legend_kind = "numeric"
+            legend_info = (bins, palette)
 
     # ---------------- GeoJSON + camadas de mapa ----------------
     geojson = make_geojson(gdf)
@@ -1021,7 +1049,7 @@ with tab1:
         if legend_kind == "numeric":
             hexc = cmap.get(val, "#999999")
         else:
-            hexc = legend_info.get(val, "#999999")
+            hexc = cmap.get(val, "#999999")
         feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
     layers = [render_geojson_layer(geojson, name="quadras")]
@@ -1040,38 +1068,69 @@ with tab1:
 
     # ---------------- Mapa + Legenda ----------------
     st.markdown("#### Mapa — Quadras + Camadas auxiliares")
-    map_col, legend_col = st.columns([4, 1], gap="large")
+    map_col, legend_col = st.columns([5, 1], gap="large")  # mais espaço pro mapa
     with map_col:
         if basemap.startswith("Satélite"):
             deck(layers, satellite=True)
         else:
             osm_basemap_deck(layers)
 
-        # Export PNG 300 DPI (mapa geral) — sob demanda para evitar custo desnecessário
+        # Export PNG 300 DPI (mapa geral)
         if st.button("🖼️ Gerar PNG 300 DPI (mapa geral)", key="t1_btn_png_geral"):
             try:
-                titulo = f"{var_sel}" + (f" — {year}" if years and year is not None else "")
-                png_bytes = _t1_png_mapa_300dpi(gdf[["value", "geometry"]].dropna(subset=["value"]), "value", cmap, gdf_overlay=None, titulo=titulo, dpi=300)
-                st.download_button("Baixar PNG 300 DPI (mapa geral)", png_bytes, file_name=f"mapa_geral_{var_sel}{'_'+str(year) if years and year is not None else ''}.png", mime="image/png", key="t1_dl_png_geral")
+                titulo = f"{var_label_for_legend}" + (f" — {year}" if years and year is not None else "")
+                png_bytes = _t1_png_mapa_300dpi(
+                    gdf[["value", "geometry"]].dropna(subset=["value"]),
+                    "value",
+                    cmap,
+                    gdf_overlay=None,
+                    titulo=titulo,
+                    dpi=300,
+                )
+                st.download_button(
+                    "Baixar PNG 300 DPI (mapa geral)",
+                    png_bytes,
+                    file_name=f"mapa_geral_{var_label_for_legend}{'_'+str(year) if years and year is not None else ''}.png",
+                    mime="image/png",
+                    key="t1_dl_png_geral",
+                )
             except Exception as e:
                 st.caption(f"Export PNG indisponível ({e})")
 
-        # Export tabela (SQ + variável)
-        df_export = gdf[[sq_col_quadras, var_sel]].rename(columns={sq_col_quadras: "SQ"})
-        _t1_download_df(df_export, f"dados_mapa_{var_sel}{'_'+str(year) if years and year is not None else ''}")
+        # Export tabela (SQ + value)
+        df_export = gdf[[sq_col_quadras, var_sel]].rename(columns={sq_col_quadras: "SQ", var_sel: var_label_for_legend})
+        _t1_download_df(df_export, f"dados_mapa_{var_label_for_legend}{'_'+str(year) if years and year is not None else ''}")
 
     with legend_col:
+        st.markdown(f"**Legenda — {var_label_for_legend}**")
         if legend_kind == "categorical":
-            render_legend_categorical(legend_info, title=f"Legenda — {var_sel}")
+            for k in sorted(cmap.keys(), key=lambda x: str(x)):
+                _legend_row(cmap[k], str(k))
         elif legend_kind == "numeric":
             bins, palette = legend_info
-            render_legend_numeric(bins, palette, title=f"Legenda — {var_sel}")
-        else:
-            st.caption("Sem legenda.")
+            # mesma função de legenda numérica, mas com título já acima
+            k = len(palette)
+            for i in range(k):
+                left = bins[i]
+                right = bins[i + 1] if i + 1 < len(bins) else float("inf")
+                def _fmt_num(x):
+                    try:
+                        if x == -float("inf"): return "-∞"
+                        if x == float("inf"): return "+∞"
+                        return f"{float(x):.3g}"
+                    except Exception:
+                        return str(x)
+                if left == -float("inf"):
+                    label = f"≤ {_fmt_num(right)}"
+                elif right == float("inf"):
+                    label = f"> {_fmt_num(left)}"
+                else:
+                    label = f"({_fmt_num(left)} – {_fmt_num(right)}]"
+                _legend_row(palette[i], label)
 
-    # ---------------- Recortes: filtra métricas apenas para a área ----------------
+    # ---------------- Recortes: mapa temático preenchido + métricas da área ----------------
     st.subheader("Recortes espaciais (GPKG)")
-    st.caption("Selecione um GPKG em `Data/mapa/recortes` para filtrar os SQs e ver métricas apenas dessa área.")
+    st.caption("Selecione um GPKG em `Data/mapa/recortes` para filtrar os SQs e ver **mapa temático** e **métricas** apenas dessa área.")
     rec_dir = None
     recorte_file_path = None
     try:
@@ -1080,7 +1139,7 @@ with tab1:
         if not recorte_files:
             st.info("Nenhum GPKG de recorte encontrado.")
         else:
-            colR0, colR1 = st.columns([3, 2], gap="large")
+            colR0, colR1 = st.columns([4, 2], gap="large")
 
             with colR0:
                 rec_sel_name = st.selectbox("Arquivo de recorte (.gpkg)", [f["name"] for f in recorte_files], index=0, key="t1_rec_file")
@@ -1088,98 +1147,121 @@ with tab1:
                 recorte_file_path = rec_obj["path"]
                 gdf_rec = load_gpkg(repo, recorte_file_path, branch)
 
-                # Desenha apenas o recorte selecionado
-                layers_rec = [render_line_layer(make_geojson(gdf_rec), name="recorte")]
-                st.markdown("#### Mapa — Recorte selecionado")
-                if basemap.startswith("Satélite"):
-                    deck(layers_rec, satellite=True)
-                else:
-                    osm_basemap_deck(layers_rec)
-
-            with colR1:
-                st.markdown("**Legenda — Recorte**")
-                _legend_row("#444444", "Contorno do recorte")
-
-                # Interseção dos SQs com o recorte (respeitando CRS)
+                # Interseção dos SQs com o recorte
                 try:
                     import geopandas as gpd
                     gq = ensure_wgs84(gdf_quadras[[sq_col_quadras, "geometry"]].copy())
                     gr = ensure_wgs84(gdf_rec[["geometry"]].copy())
-                    # sjoin quando possível
                     try:
                         sq_sel = gpd.sjoin(gq, gr, predicate="intersects", how="inner")[sq_col_quadras].unique().tolist()
                     except Exception:
-                        bbox = gr.total_bounds  # fallback por bbox
+                        bbox = gr.total_bounds
                         sq_sel = gq.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]][sq_col_quadras].unique().tolist()
                 except Exception as e:
                     st.error(f"Falha ao cruzar recorte com SQs: {e}")
                     sq_sel = []
 
+                # Subconjunto colorido para o recorte usando a MESMA variável/legenda do mapa geral
+                gdf_color_rec = gdf[gdf[sq_col_quadras].isin(sq_sel)].copy()
+                gj_rec_fill = make_geojson(gdf_color_rec)
+                for feat in gj_rec_fill.get("features", []):
+                    val = feat.get("properties", {}).get("value", None)
+                    hexc = cmap.get(val, "#999999")
+                    feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+
+                # Camadas: preenchido + contorno do recorte
+                layers_rec = [render_geojson_layer(gj_rec_fill, name="recorte_fill"),
+                              render_line_layer(make_geojson(gdf_rec), name="recorte_borda")]
+
+                st.markdown("#### Mapa — Recorte selecionado (preenchido pela variável escolhida)")
+                if basemap.startswith("Satélite"):
+                    deck(layers_rec, satellite=True)
+                else:
+                    osm_basemap_deck(layers_rec)
+
+                # Export PNG 300 DPI do mapa do recorte
+                if st.button("🖼️ Gerar PNG 300 DPI (mapa do recorte)", key="t1_btn_png_rec"):
+                    try:
+                        titulo = f"{var_label_for_legend}" + (f" — {year}" if years and year is not None else "")
+                        png_bytes = _t1_png_mapa_300dpi(
+                            gdf_color_rec[["value", "geometry"]].dropna(subset=["value"]),
+                            "value",
+                            cmap,
+                            gdf_overlay=gdf_rec,
+                            titulo=titulo,
+                            dpi=300,
+                        )
+                        base_nome = f"recorte_{os.path.splitext(rec_sel_name)[0]}"
+                        st.download_button("Baixar PNG 300 DPI (mapa do recorte)", png_bytes, file_name=f"{base_nome}_{var_label_for_legend}_300dpi.png", mime="image/png", key="t1_dl_png_rec")
+                    except Exception as e:
+                        st.caption(f"Export PNG indisponível ({e})")
+
+            with colR1:
                 st.metric("SQs no recorte", len(sq_sel))
+                st.markdown(f"**Legenda — {var_label_for_legend} (recorte)**")
+                if legend_kind == "categorical":
+                    # mostra apenas categorias presentes no recorte
+                    present = gdf_color_rec["value"].dropna().astype(str).unique().tolist()
+                    for k in sorted(present, key=lambda x: str(x)):
+                        _legend_row(cmap[k], str(k))
+                else:
+                    # numérica — mantém os mesmos bins da visão geral
+                    bins, palette = legend_info
+                    k = len(palette)
+                    for i in range(k):
+                        left = bins[i]
+                        right = bins[i + 1] if i + 1 < len(bins) else float("inf")
+                        def _fmt_num(x):
+                            try:
+                                if x == -float("inf"): return "-∞"
+                                if x == float("inf"): return "+∞"
+                                return f"{float(x):.3g}"
+                            except Exception:
+                                return str(x)
+                        if left == -float("inf"):
+                            label = f"≤ {_fmt_num(right)}"
+                        elif right == float("inf"):
+                            label = f"> {_fmt_num(left)}"
+                        else:
+                            label = f"({_fmt_num(left)} – {_fmt_num(right)}]"
+                        _legend_row(palette[i], label)
 
-            # Filtra dados (df_vars já foi filtrado por Ano)
-            df_vars_rec = df_vars[df_vars[join_col].isin(sq_sel)].copy()
+                # Dados da área recortada (por SQ e resumo)
+                st.markdown("#### Métricas para a área recortada")
+                df_vars_rec = df_vars[df_vars[join_col].isin(sq_sel)].copy()
+                # variáveis numéricas válidas no recorte
+                id_like_r = {c for c in df_vars_rec.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
+                time_like_r = {c for c in df_vars_rec.columns if str(c).lower() in {"ano", "year"}}
+                ignore_cols_r = id_like_r | time_like_r
+                num_cols_rec = [c for c in df_vars_rec.columns if pd.api.types.is_numeric_dtype(df_vars_rec[c])]
+                var_opts_rec = [c for c in num_cols_rec if c not in ignore_cols_r] or [c for c in df_vars_rec.columns if c not in ignore_cols_r]
 
-            # Escolha de métricas + exibição
-            st.markdown("#### Métricas para a área recortada")
-            id_like = {c for c in df_vars_rec.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
-            time_like = {c for c in df_vars_rec.columns if str(c).lower() in {"ano", "year"}}
-            ignore_cols = id_like | time_like
-            num_cols_rec = [c for c in df_vars_rec.columns if pd.api.types.is_numeric_dtype(df_vars_rec[c])]
-            var_opts_rec = [c for c in num_cols_rec if c not in ignore_cols] or [c for c in df_vars_rec.columns if c not in ignore_cols]
-
-            leftC, rightC = st.columns([3, 2], gap="large")
-            with leftC:
-                vars_escolhidas = st.multiselect(
-                    "Variáveis (métricas) a exibir",
-                    var_opts_rec,
-                    default=[var_sel] if var_sel in var_opts_rec else var_opts_rec[: min(5, len(var_opts_rec))],
-                    key="t1_vars_rec"
-                )
                 modo = st.radio("Exibição", ["Por SQ", "Resumo (estatísticas)"], horizontal=True, index=0, key="t1_modo_rec")
-
-                if vars_escolhidas:
-                    if modo == "Por SQ":
-                        df_out = df_vars_rec[[join_col] + vars_escolhidas].sort_values(join_col)
-                        st.dataframe(df_out, use_container_width=True)
-                        _t1_download_df(df_out, f"recorte_porSQ_{os.path.splitext(rec_sel_name)[0]}")
-                    else:
+                if modo == "Por SQ":
+                    # mostra prioritariamente a variável usada no mapa (se for numérica)
+                    cols_show = [join_col]
+                    if color_mode in ("numeric_from_flag", "fallback_numeric") and var_label_for_legend in df_vars_rec.columns:
+                        cols_show.append(var_label_for_legend)
+                    st.dataframe(df_vars_rec[cols_show].sort_values(join_col), use_container_width=True)
+                    _t1_download_df(df_vars_rec[cols_show].sort_values(join_col), f"recorte_porSQ_{os.path.splitext(rec_sel_name)[0]}")
+                else:
+                    # resumo das numéricas selecionadas
+                    vars_escolhidas = st.multiselect(
+                        "Variáveis (métricas) a resumir",
+                        var_opts_rec,
+                        default=[var_label_for_legend] if var_label_for_legend in var_opts_rec else var_opts_rec[: min(5, len(var_opts_rec))],
+                        key="t1_vars_rec"
+                    )
+                    if vars_escolhidas:
                         desc = df_vars_rec[vars_escolhidas].describe().T
                         st.dataframe(desc, use_container_width=True)
                         _t1_download_df(desc.reset_index().rename(columns={"index": "variavel"}), f"recorte_resumo_{os.path.splitext(rec_sel_name)[0]}")
 
-            with rightC:
-                st.markdown("**Exportar dados/arquivos da área recortada**")
-                base_nome = f"recorte_{os.path.splitext(rec_sel_name)[0]}"
-
-                # GeoJSON com SQs do recorte
-                try:
-                    gdf_clip = gdf_quadras[gdf_quadras[sq_col_quadras].isin(sq_sel)][[sq_col_quadras, "geometry"]].copy()
-                    gj_clip = make_geojson(gdf_clip)
-                    st.download_button(
-                        "📥 GeoJSON (SQs do recorte)",
-                        data=json.dumps(gj_clip),
-                        file_name=f"{base_nome}_sqs.geojson",
-                        mime="application/geo+json",
-                        key="t1_dl_geojson_rec"
-                    )
-                except Exception:
-                    pass
-
-                # PNG 300 DPI do mapa temático recortado (sob demanda)
-                if st.button("🖼️ Gerar PNG 300 DPI (mapa no recorte)", key="t1_btn_png_rec"):
-                    try:
-                        gdf_color = gdf[gdf[sq_col_quadras].isin(sq_sel)][[sq_col_quadras, "value", "geometry"]].copy()
-                        titulo = f"{var_sel}" + (f" — {year}" if years and year is not None else "")
-                        png_bytes = _t1_png_mapa_300dpi(gdf_color.dropna(subset=["value"]), "value", cmap, gdf_overlay=gdf_rec, titulo=titulo, dpi=300)
-                        st.download_button("Baixar PNG 300 DPI (mapa do recorte)", png_bytes, file_name=f"{base_nome}_mapa_300dpi.png", mime="image/png", key="t1_dl_png_rec")
-                    except Exception as e:
-                        st.caption(f"Export PNG indisponível ({e})")
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
 
-    # ---------------- Debug — caminhos usados ----------------
-    with st.expander("🔎 Debug — caminhos usados (Aba 1)"):
+    # ---------------- Debug — caminhos/variáveis usados ----------------
+    with st.expander("🔎 Debug — caminhos/variáveis usados (Aba 1)"):
         debug_info = {
             "repo@branch": f"{repo}@{branch}",
             "quadras_path_usado": quadras_path_used,
@@ -1187,14 +1269,15 @@ with tab1:
             "camadas_auxiliares_sel": other_layers_paths,
             "dados_base_dir": base_dir,
             "arquivo_dados_selecionado": data_file_path,
-            "recortes_dir": rec_dir,
-            "arquivo_recorte_sel": recorte_file_path,
             "coluna_SQ_quadras": sq_col_quadras,
             "coluna_SQ_dados": join_col,
             "coluna_ano": years_col if 'years_col' in locals() else None,
             "ano_selecionado": year if 'year' in locals() else None,
-            "variavel_mapeada": var_sel,
-            "classes_k": n_classes,
+            "third_col": third_col,
+            "color_mode": color_mode,
+            "var_usada_para_pintar/legenda": var_label_for_legend,
+            "recortes_dir": rec_dir,
+            "arquivo_recorte_sel": recorte_file_path,
             "legend_kind": legend_kind,
         }
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
@@ -1566,6 +1649,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
