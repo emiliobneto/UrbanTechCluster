@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.express as px
 import pydeck as pdk
 import streamlit as st
-
+import ast
 # ==========================
 # CONFIG GERAL
 # ==========================
@@ -372,87 +372,16 @@ def load_tabular(owner_repo, path, branch):
         return load_parquet(owner_repo, path, branch)
     return load_csv(owner_repo, path, branch)
 
-def pairs_to_matrix(df_pairs: pd.DataFrame, i_col: str, j_col: str, val_col: str, sym_max=True):
-    """Converte tabela longa (i,j,valor) em matriz pivot."""
-    if not set([i_col, j_col, val_col]).issubset(df_pairs.columns):
-        return None
-    m = df_pairs.pivot_table(index=i_col, columns=j_col, values=val_col, aggfunc="mean")
-    # completa simetria, se desejado
+def pairs_to_matrix(df_pairs, i_col, j_col, val_col, sym_max=True):
+    m = df_pairs.pivot(index=i_col, columns=j_col, values=val_col)
     if sym_max:
-        m2 = m.copy()
-        m2 = m2.combine_first(m2.T)
-        m2 = np.maximum(m2, m2.T)
-        m = m2
+        m = m.combine_first(m.T)
+        m = pd.DataFrame(np.maximum(m.values, m.T.values), index=m.index, columns=m.columns)
     return m
 
 # ==========================
 # IMPORTA A ABA 4 (PCA)
 # ==========================
-# --- Import da aba PCA de forma resiliente ---
-def _import_render_pca_tab_strong():
-    import importlib, importlib.util, sys, os
-    here = os.path.dirname(__file__)
-    parent = os.path.dirname(here)
-
-    # 1) tentativas de import "normais"
-    last_err = None
-    for modname in ("ml_pca_tab", "urbantechcluster.ml_pca_tab"):
-        try:
-            mod = importlib.import_module(modname)
-            if hasattr(mod, "render_pca_tab"):
-                return mod.render_pca_tab
-        except Exception as e:
-            last_err = e  # pode ser ImportError, ModuleNotFoundError etc.
-
-    # 2) tentativas por caminho (mesmo dir e diretório pai)
-    candidates = [
-        os.path.join(here, "ml_pca_tab.py"),
-        os.path.join(parent, "ml_pca_tab.py"),
-    ]
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                spec = importlib.util.spec_from_file_location("ml_pca_tab", path)
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules["ml_pca_tab"] = mod
-                spec.loader.exec_module(mod)
-                if hasattr(mod, "render_pca_tab"):
-                    return mod.render_pca_tab
-        except Exception as e:
-            last_err = e
-
-    # 3) se não achou, retorna None e deixamos a aba PCA desabilitada
-    return None, last_err
-
-_render = _import_render_pca_tab_strong()
-if isinstance(_render, tuple):
-    render_pca_tab, _render_err = _render
-else:
-    render_pca_tab, _render_err = _render, None
-
-# feedback no sidebar e fallback para não quebrar a app
-if render_pca_tab is None:
-    st.sidebar.error(
-        "Aba 4 (PCA) desabilitada: não encontrei `ml_pca_tab.py` "
-        "no mesmo diretório nem no diretório pai.\n"
-        f"Detalhe: {repr(_render_err)}"
-    )
-    def render_pca_tab(**kwargs):
-        st.error(
-            "A aba de PCA está desabilitada porque o arquivo `ml_pca_tab.py` "
-            "não foi encontrado/importado. Coloque `ml_pca_tab.py` no mesmo "
-            "diretório do `app_dash.py` (ou dentro do pacote `urbantechcluster/`) "
-            "e recarregue o app."
-        )
-
-import ast
-
-def _find_pca_base_dir(repo, branch, pick_existing_dir):
-    # tenta variações mais comuns do caminho
-    return pick_existing_dir(
-        repo, branch,
-        ["Data/analises/PCA", "Data/Analises/PCA", "data/analises/PCA", "data/Analises/PCA"]
-    )
 
 def _safe_literal_list(x):
     """
@@ -481,28 +410,6 @@ def _safe_literal_list(x):
         return vals
     except Exception:
         return []
-
-def _classify_pca_file(df: pd.DataFrame):
-    """
-    Classifica rapidamente um arquivo de PCA em:
-      - 'evr'         → contém variância explicada (colunas variancia_explicada/var_exp etc.)
-      - 'pipeline'    → tabela de pipeline (linhas 'pca','imputer','cols','k' e colunas por grupo)
-      - 'generic'     → mostrar preview
-    """
-    cols_l = [c.lower() for c in df.columns]
-    # sinais de EVR
-    if any(("variancia" in c and ("explic" in c or "acumul" in c)) or ("var_exp" in c) for c in cols_l):
-        return "evr"
-    # sinais de pipeline (essas tabelas costumam ter a 1ª coluna com rótulos: pca, imputer, scaler, cols, k)
-    first_col = df.columns[0] if len(df.columns) else None
-    if first_col and df[first_col].astype(str).str.lower().head(5).isin(
-        ["pca", "imputer", "scaler", "cols", "k"]
-    ).any():
-        return "pipeline"
-    # também pode vir como colunas com nomes dos grupos e linhas com 'pca','imputer', etc.
-    if any("pca(" in str(x).lower() for x in df.head(5).to_numpy().reshape(-1)):
-        return "pipeline"
-    return "generic"
 
 def _render_variancia_file(df: pd.DataFrame):
     """
@@ -601,7 +508,151 @@ def _render_pipeline_file(df: pd.DataFrame):
             st.write(k_row.to_frame("k").T)
         except Exception:
             pass
-
+def _find_pca_base_dir(repo, branch, pick_existing_dir):
+        return pick_existing_dir(repo, branch, ["Data/analises/PCA", "Data/Analises/PCA", "data/analises/PCA"])
+    
+    def _classify_pca_file(df: pd.DataFrame):
+        cols = [c.lower() for c in df.columns]
+        if any(("explained" in c and "ratio" in c) for c in cols) or "explained_variance_ratio" in cols:
+            return "evr"
+        if ("component" in cols and ("loading" in cols or "valor" in cols or "carga" in cols)):
+            return "loadings_long"
+        pc_like = [c for c in cols if c.startswith("pc") or c.startswith("component")]
+        if len(pc_like) >= 2:
+            return "loadings_wide"
+        id_like = any(c in cols for c in ["sq","id","codigo","code"])
+        has_pcs = any(c.startswith("pc") for c in cols)
+        if has_pcs:
+            return "scores" if id_like else "scores_no_id"
+        return "unknown"
+    
+    def _list_candidate_files(repo, branch, base_dir, list_files, load_parquet, load_csv):
+        files_all = list_files(repo, base_dir, branch, (".parquet",".csv"))
+        candidates = {"evr": [], "loadings": [], "scores": [], "unknown": []}
+        for f in files_all:
+            try:
+                df = load_parquet(repo, f["path"], branch) if f["name"].endswith(".parquet") else load_csv(repo, f["path"], branch)
+                kind = _classify_pca_file(df)
+            except Exception:
+                kind = "unknown"
+            if kind == "evr":
+                candidates["evr"].append((f, "evr"))
+            elif kind in ("loadings_long","loadings_wide"):
+                candidates["loadings"].append((f, kind))
+            elif kind in ("scores","scores_no_id"):
+                candidates["scores"].append((f, kind))
+            else:
+                candidates["unknown"].append((f, "unknown"))
+        return candidates
+    
+    def _tidy_loadings(df: pd.DataFrame):
+        cols_lower = {c: c.lower() for c in df.columns}
+        if "component" in cols_lower.values() and any(x in cols_lower.values() for x in ["loading","valor","carga"]):
+            comp_col = next(k for k,v in cols_lower.items() if v=="component")
+            load_col = next(k for k,v in cols_lower.items() if v in ("loading","valor","carga"))
+            var_col = next((k for k,v in cols_lower.items() if v in ("variable","feature","variavel","atributo")), None)
+            if var_col is None:
+                non_num = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c]) and c != comp_col]
+                var_col = non_num[0] if non_num else comp_col
+            out = df[[var_col, comp_col, load_col]].copy()
+            out.columns = ["variable","component","loading"]
+            return out
+        pc_cols = [c for c in df.columns if c.lower().startswith("pc") or c.lower().startswith("component")]
+        if pc_cols:
+            var_candidates = [c for c in df.columns if c not in pc_cols]
+            if len(var_candidates) == 0:
+                df = df.copy(); df["variable"] = df.index.astype(str)
+                var_col = "variable"
+            else:
+                var_col = var_candidates[0]
+            long = df.melt(id_vars=[var_col], value_vars=pc_cols, var_name="component", value_name="loading")
+            long.columns = ["variable","component","loading"]
+            return long
+        return pd.DataFrame(columns=["variable","component","loading"])
+    
+    def _prep_scores(df: pd.DataFrame):
+        cols = {c.lower(): c for c in df.columns}
+        pc_cols = [c for c in df.columns if c.lower().startswith("pc")]
+        id_col = cols.get("sq") or cols.get("id") or cols.get("codigo") or cols.get("code")
+        ano_col = cols.get("ano")
+        return pc_cols, id_col, ano_col
+    
+    def _render_evr_section(df_evr: pd.DataFrame):
+        cols = {c.lower(): c for c in df_evr.columns}
+        if "explained_variance_ratio" in cols:
+            evr_col = cols["explained_variance_ratio"]; comp_col = None
+        else:
+            evr_col = next((c for c in df_evr.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
+            comp_col = next((c for c in df_evr.columns if c.lower().startswith("comp") or c.lower().startswith("pc")), None)
+        df = df_evr.copy()
+        if comp_col is None:
+            df = df.reset_index(drop=True)
+            df["component"] = [f"PC{i+1}" for i in range(len(df))]
+            comp_col = "component"
+        else:
+            df["component"] = df[comp_col].astype(str)
+        df["explained_variance_ratio"] = df[evr_col].astype(float)
+        df = df[["component","explained_variance_ratio"]].dropna()
+        try: df = df.sort_values("component")
+        except Exception: pass
+        df["cumulative"] = df["explained_variance_ratio"].cumsum()
+    
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.bar(df, x="component", y="explained_variance_ratio", title="Scree — Variância explicada por componente")
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            fig2 = px.line(df, x="component", y="cumulative", markers=True, title="Variância explicada acumulada")
+            st.plotly_chart(fig2, use_container_width=True)
+    
+        st.subheader("Tabela — Variância explicada")
+        st.dataframe(df, use_container_width=True)
+    
+    def _render_loadings_section(df_load: pd.DataFrame):
+        long = _tidy_loadings(df_load)
+        if long.empty:
+            st.warning("Não foi possível identificar a estrutura de *loadings* deste arquivo.")
+            st.dataframe(df_load.head(), use_container_width=True)
+            return
+        comps = sorted(long["component"].astype(str).unique(), key=lambda x: (len(x), x))
+        c1, c2 = st.columns([2,1])
+        with c1:
+            comp_sel = st.selectbox("Componente", comps, index=0)
+        with c2:
+            topn = st.slider("Top |loading|", 5, 30, 15)
+    
+        sub = long[long["component"].astype(str)==str(comp_sel)].copy()
+        sub["abs_loading"] = sub["loading"].abs()
+        sub = sub.sort_values("abs_loading", ascending=False).head(topn)
+        fig = px.bar(sub.sort_values("abs_loading"), x="abs_loading", y="variable", orientation="h",
+                     title=f"Maiores |loadings| — {comp_sel}")
+        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Tabela — Loadings")
+        st.dataframe(sub.drop(columns=["abs_loading"]), use_container_width=True)
+    
+    def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
+        pc_cols, id_col, ano_col = _prep_scores(df_scores)
+        if not pc_cols:
+            st.warning("Arquivo de *scores* sem colunas de PCs identificáveis.")
+            st.dataframe(df_scores.head(), use_container_width=True)
+            return
+    
+        # filtro opcional por ano
+        if ano_col:
+            anos = sorted([int(x) for x in df_scores[ano_col].dropna().unique()])
+            ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1])
+            df_scores = df_scores[df_scores[ano_col]==ano_sel]
+    
+        pc_x = st.selectbox("PC eixo X", pc_cols, index=0)
+        pc_y = st.selectbox("PC eixo Y", pc_cols, index=1 if len(pc_cols) > 1 else 0)
+        hover_cols = [pc_x, pc_y]
+        if id_col: hover_cols.insert(0, id_col)
+    
+        fig = px.scatter(df_scores, x=pc_x, y=pc_y, hover_data=hover_cols, title=f"Biplot (scores) — {pc_x} × {pc_y}")
+        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Tabela — Scores (colunas selecionadas)")
+        st.dataframe(df_scores[hover_cols].dropna(how="all"), use_container_width=True)
+                
 def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
     st.subheader("Arquivos de PCA (sem recálculo)")
     base_dir = _find_pca_base_dir(repo, branch, pick_existing_dir)
@@ -1017,193 +1068,8 @@ with tab4:
         load_csv=load_csv
     )
     
-    def _find_pca_base_dir(repo, branch, pick_existing_dir):
-        return pick_existing_dir(repo, branch, ["Data/analises/PCA", "Data/Analises/PCA", "data/analises/PCA"])
     
-    def _classify_pca_file(df: pd.DataFrame):
-        cols = [c.lower() for c in df.columns]
-        if any(("explained" in c and "ratio" in c) for c in cols) or "explained_variance_ratio" in cols:
-            return "evr"
-        if ("component" in cols and ("loading" in cols or "valor" in cols or "carga" in cols)):
-            return "loadings_long"
-        pc_like = [c for c in cols if c.startswith("pc") or c.startswith("component")]
-        if len(pc_like) >= 2:
-            return "loadings_wide"
-        id_like = any(c in cols for c in ["sq","id","codigo","code"])
-        has_pcs = any(c.startswith("pc") for c in cols)
-        if has_pcs:
-            return "scores" if id_like else "scores_no_id"
-        return "unknown"
-    
-    def _list_candidate_files(repo, branch, base_dir, list_files, load_parquet, load_csv):
-        files_all = list_files(repo, base_dir, branch, (".parquet",".csv"))
-        candidates = {"evr": [], "loadings": [], "scores": [], "unknown": []}
-        for f in files_all:
-            try:
-                df = load_parquet(repo, f["path"], branch) if f["name"].endswith(".parquet") else load_csv(repo, f["path"], branch)
-                kind = _classify_pca_file(df)
-            except Exception:
-                kind = "unknown"
-            if kind == "evr":
-                candidates["evr"].append((f, "evr"))
-            elif kind in ("loadings_long","loadings_wide"):
-                candidates["loadings"].append((f, kind))
-            elif kind in ("scores","scores_no_id"):
-                candidates["scores"].append((f, kind))
-            else:
-                candidates["unknown"].append((f, "unknown"))
-        return candidates
-    
-    def _tidy_loadings(df: pd.DataFrame):
-        cols_lower = {c: c.lower() for c in df.columns}
-        if "component" in cols_lower.values() and any(x in cols_lower.values() for x in ["loading","valor","carga"]):
-            comp_col = next(k for k,v in cols_lower.items() if v=="component")
-            load_col = next(k for k,v in cols_lower.items() if v in ("loading","valor","carga"))
-            var_col = next((k for k,v in cols_lower.items() if v in ("variable","feature","variavel","atributo")), None)
-            if var_col is None:
-                non_num = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c]) and c != comp_col]
-                var_col = non_num[0] if non_num else comp_col
-            out = df[[var_col, comp_col, load_col]].copy()
-            out.columns = ["variable","component","loading"]
-            return out
-        pc_cols = [c for c in df.columns if c.lower().startswith("pc") or c.lower().startswith("component")]
-        if pc_cols:
-            var_candidates = [c for c in df.columns if c not in pc_cols]
-            if len(var_candidates) == 0:
-                df = df.copy(); df["variable"] = df.index.astype(str)
-                var_col = "variable"
-            else:
-                var_col = var_candidates[0]
-            long = df.melt(id_vars=[var_col], value_vars=pc_cols, var_name="component", value_name="loading")
-            long.columns = ["variable","component","loading"]
-            return long
-        return pd.DataFrame(columns=["variable","component","loading"])
-    
-    def _prep_scores(df: pd.DataFrame):
-        cols = {c.lower(): c for c in df.columns}
-        pc_cols = [c for c in df.columns if c.lower().startswith("pc")]
-        id_col = cols.get("sq") or cols.get("id") or cols.get("codigo") or cols.get("code")
-        ano_col = cols.get("ano")
-        return pc_cols, id_col, ano_col
-    
-    def _render_evr_section(df_evr: pd.DataFrame):
-        cols = {c.lower(): c for c in df_evr.columns}
-        if "explained_variance_ratio" in cols:
-            evr_col = cols["explained_variance_ratio"]; comp_col = None
-        else:
-            evr_col = next((c for c in df_evr.columns if "explained" in c.lower() and "ratio" in c.lower()), None)
-            comp_col = next((c for c in df_evr.columns if c.lower().startswith("comp") or c.lower().startswith("pc")), None)
-        df = df_evr.copy()
-        if comp_col is None:
-            df = df.reset_index(drop=True)
-            df["component"] = [f"PC{i+1}" for i in range(len(df))]
-            comp_col = "component"
-        else:
-            df["component"] = df[comp_col].astype(str)
-        df["explained_variance_ratio"] = df[evr_col].astype(float)
-        df = df[["component","explained_variance_ratio"]].dropna()
-        try: df = df.sort_values("component")
-        except Exception: pass
-        df["cumulative"] = df["explained_variance_ratio"].cumsum()
-    
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = px.bar(df, x="component", y="explained_variance_ratio", title="Scree — Variância explicada por componente")
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            fig2 = px.line(df, x="component", y="cumulative", markers=True, title="Variância explicada acumulada")
-            st.plotly_chart(fig2, use_container_width=True)
-    
-        st.subheader("Tabela — Variância explicada")
-        st.dataframe(df, use_container_width=True)
-    
-    def _render_loadings_section(df_load: pd.DataFrame):
-        long = _tidy_loadings(df_load)
-        if long.empty:
-            st.warning("Não foi possível identificar a estrutura de *loadings* deste arquivo.")
-            st.dataframe(df_load.head(), use_container_width=True)
-            return
-        comps = sorted(long["component"].astype(str).unique(), key=lambda x: (len(x), x))
-        c1, c2 = st.columns([2,1])
-        with c1:
-            comp_sel = st.selectbox("Componente", comps, index=0)
-        with c2:
-            topn = st.slider("Top |loading|", 5, 30, 15)
-    
-        sub = long[long["component"].astype(str)==str(comp_sel)].copy()
-        sub["abs_loading"] = sub["loading"].abs()
-        sub = sub.sort_values("abs_loading", ascending=False).head(topn)
-        fig = px.bar(sub.sort_values("abs_loading"), x="abs_loading", y="variable", orientation="h",
-                     title=f"Maiores |loadings| — {comp_sel}")
-        st.plotly_chart(fig, use_container_width=True)
-        st.subheader("Tabela — Loadings")
-        st.dataframe(sub.drop(columns=["abs_loading"]), use_container_width=True)
-    
-    def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
-        pc_cols, id_col, ano_col = _prep_scores(df_scores)
-        if not pc_cols:
-            st.warning("Arquivo de *scores* sem colunas de PCs identificáveis.")
-            st.dataframe(df_scores.head(), use_container_width=True)
-            return
-    
-        # filtro opcional por ano
-        if ano_col:
-            anos = sorted([int(x) for x in df_scores[ano_col].dropna().unique()])
-            ano_sel = st.select_slider("Ano (scores)", options=anos, value=anos[-1])
-            df_scores = df_scores[df_scores[ano_col]==ano_sel]
-    
-        pc_x = st.selectbox("PC eixo X", pc_cols, index=0)
-        pc_y = st.selectbox("PC eixo Y", pc_cols, index=1 if len(pc_cols) > 1 else 0)
-        hover_cols = [pc_x, pc_y]
-        if id_col: hover_cols.insert(0, id_col)
-    
-        fig = px.scatter(df_scores, x=pc_x, y=pc_y, hover_data=hover_cols, title=f"Biplot (scores) — {pc_x} × {pc_y}")
-        st.plotly_chart(fig, use_container_width=True)
-        st.subheader("Tabela — Scores (colunas selecionadas)")
-        st.dataframe(df_scores[hover_cols].dropna(how="all"), use_container_width=True)
-    
-    def render_pca_tab(repo, branch, pick_existing_dir, list_files, load_parquet, load_csv, github_tree_paths):
-        st.subheader("Arquivos de PCA (somente leitura)")
-        base_dir = _find_pca_base_dir(repo, branch, pick_existing_dir)
-    
-        with st.spinner("Procurando arquivos de PCA..."):
-            cands = _list_candidate_files(repo, branch, base_dir, list_files, load_parquet, load_csv)
-    
-        st.caption(f"Diretório PCA: `{base_dir}`")
-    
-        # 1) Variância explicada
-        st.markdown("### 1) Variância explicada (Scree + cumulativa)")
-        if cands["evr"]:
-            sel_evr_name = st.selectbox("Arquivo de variância explicada", [f["name"] for f,_ in cands["evr"]], index=0)
-            evr_obj, _ = next(x for x in cands["evr"] if x[0]["name"] == sel_evr_name)
-            df_evr = load_parquet(repo, evr_obj["path"], branch) if evr_obj["name"].endswith(".parquet") else load_csv(repo, evr_obj["path"], branch)
-            _render_evr_section(df_evr)
-        else:
-            st.info("Nenhum arquivo claramente identificado como 'explained_variance_ratio'.")
-    
-        st.divider()
-    
-        # 2) Loadings
-        st.markdown("### 2) Cargas (loadings) por componente")
-        if cands["loadings"]:
-            sel_load_name = st.selectbox("Arquivo de loadings", [f["name"] for f,_ in cands["loadings"]], index=0)
-            load_obj, kind = next(x for x in cands["loadings"] if x[0]["name"] == sel_load_name)
-            df_load = load_parquet(repo, load_obj["path"], branch) if load_obj["name"].endswith(".parquet") else load_csv(repo, load_obj["path"], branch)
-            _render_loadings_section(df_load)
-        else:
-            st.info("Nenhum arquivo de *loadings* identificado.")
-    
-        st.divider()
-    
-        # 3) Scores
-        st.markdown("### 3) Scores / Projeções (Biplot PC1×PC2)")
-        if cands["scores"]:
-            sel_scores_name = st.selectbox("Arquivo de scores", [f["name"] for f,_ in cands["scores"]], index=0)
-            sc_obj, kind = next(x for x in cands["scores"] if x[0]["name"] == sel_scores_name)
-            df_scores = load_parquet(repo, sc_obj["path"], branch) if sc_obj["name"].endswith(".parquet") else load_csv(repo, sc_obj["path"], branch)
-            _render_scores_section(df_scores, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv)
-        else:
-            st.info("Nenhum arquivo de *scores* identificado.")
+
 
 
 
