@@ -1339,6 +1339,24 @@ with tab2:
         m = _re.search(r"\d+", str(x))
         return int(m.group(0)) if m else None
 
+    def _sig_index(p):
+        """Índice de significância: *** <0,001; ** <0,01; * <0,05; • <0,10; ns ≥0,10; '' se NaN."""
+        try:
+            p = float(p)
+        except Exception:
+            return ""
+        if not np.isfinite(p):
+            return ""
+        if p < 0.001:
+            return "***"
+        if p < 0.01:
+            return "**"
+        if p < 0.05:
+            return "*"
+        if p < 0.10:
+            return "•"
+        return "ns"
+
     label_map = {
         0: "0 – Ausência de clusterização",
         1: "1 – Cluster em estágio inicial",
@@ -1349,11 +1367,11 @@ with tab2:
     # ---------- fonte dos clusters (upload opcional ou GitHub) ----------
     colTopL, colTopR = st.columns([2,1])
     with colTopL:
-        up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv", "parquet"], key="clu_upl")
+        up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv", "parquet"], key="tab2_clu_upl")
     with colTopR:
         simplify_tol = st.slider(
             "Simplificação da geometria (°)", 0.0, 0.0008, 0.0002, 0.0001,
-            help="Valores maiores = menos vértices = mais rápido.", key="clu_simplify"
+            help="Valores maiores = menos vértices = mais rápido.", key="tab2_clu_simplify"
         )
 
     if up is not None:
@@ -1387,7 +1405,7 @@ with tab2:
         anos_vals = pd.to_numeric(df_est[ano_col_est], errors="coerce")
         anos_ok = sorted(anos_vals.dropna().astype(int).unique().tolist())
         if anos_ok:
-            year_sel = st.select_slider("Ano (clusters)", options=anos_ok, value=anos_ok[-1], key="clu_ano")
+            year_sel = st.select_slider("Ano (clusters)", options=anos_ok, value=anos_ok[-1], key="tab2_clu_ano")
             df_est = df_est.loc[anos_vals.astype("Int64") == year_sel].copy()
             if df_est.empty:
                 st.error(f"Sem registros de cluster para o ano {year_sel} em {source_label}."); st.stop()
@@ -1396,7 +1414,7 @@ with tab2:
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label)."); st.stop()
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
-    cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
+    cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="tab2_clu_cluster_col")
 
     # ---------- quadras (somente colunas necessárias) ----------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
@@ -1427,7 +1445,7 @@ with tab2:
     gdfc_base = gdfq_full.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
 
     # mapping de labels e paleta
-    def _attach_colors(gdf_in: "GeoDataFrame"):
+    def _attach_colors(gdf_in):
         g = gdf_in.copy()
         g["_cl_code_clean"] = g["_cl_code"].where(g["_cl_code"].isin([0, 1, 2, 3]))
         _codes = g["_cl_code_clean"].astype("Int64")
@@ -1461,7 +1479,7 @@ with tab2:
     gdf_rec = None
     gdfc_rec = None
     if rec_files:
-        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files], index=0, key="clu_rec_file")
+        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files], index=0, key="tab2_clu_rec_file")
         if rec_sel != "(sem recorte)":
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
@@ -1485,9 +1503,8 @@ with tab2:
                     pass
 
     # ---------- MAPAS ----------
-    # 1) Geral (sempre)
     st.markdown("### 🗺️ Mapa — Clusters por SQ (geral)")
-    base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+    base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="tab2_clu_base")
     geojson_main = make_geojson(gdfc_main[[gdfc_main.geometry.name, "cluster_lbl", "fill_color"]])
     lyr_main = render_geojson_layer(geojson_main, name="clusters")
     if base_map.startswith("Satélite"):
@@ -1495,12 +1512,10 @@ with tab2:
     else:
         osm_basemap_deck([lyr_main])
 
-    # legenda (geral)
     st.markdown("**Legenda — Estágio (geral)**")
     for lab in cats_sorted:
         _legend_row(cmap[lab], lab)
 
-    # 2) Recorte (se houver)
     if gdf_rec is not None and gdfc_rec is not None and not gdfc_rec.empty:
         st.markdown("### 🗺️ Mapa — Recorte selecionado")
         geojson_rec = make_geojson(gdfc_rec[[gdfc_rec.geometry.name, "cluster_lbl", "fill_color"]])
@@ -1526,42 +1541,37 @@ with tab2:
         path = f"{base}/univariadas.parquet"
         return load_parquet(repo, path, branch)
 
-    ver_uni = st.radio("Versão", ["originais", "winsorizados"], horizontal=True, key="mxu_ver")
+    ver_uni = st.radio("Versão", ["originais", "winsorizados"], horizontal=True, key="tab2_mxu_ver")
     dfu = _load_univariadas(ver_uni)
     st.caption(f"Fonte: `Data/analises/{'original' if ver_uni=='originais' else 'winsorizados'}/univariadas.parquet`")
 
-    # colunas chave
     col_var = next((c for c in dfu.columns if str(c).lower() == "variavel"), None)
     col_clu = next((c for c in dfu.columns if str(c).lower() == "cluster"), None)
     col_ano = next((c for c in dfu.columns if str(c).lower() in ("ano","year")), None)
     if not (col_var and col_clu):
         st.error("Arquivo univariadas precisa conter colunas 'variavel' e 'cluster'.")
     else:
-        # filtro de ano (se houver)
         if col_ano and dfu[col_ano].notna().any():
             anos = pd.to_numeric(dfu[col_ano], errors="coerce").dropna().astype(int).unique().tolist()
             anos = sorted(anos)
-            ano_uni = st.select_slider("Ano", options=anos, value=anos[-1], key="mxu_ano")
+            ano_uni = st.select_slider("Ano", options=anos, value=anos[-1], key="tab2_mxu_ano")
             dfy = dfu[pd.to_numeric(dfu[col_ano], errors="coerce").astype("Int64") == ano_uni].copy()
         else:
             ano_uni = None
             dfy = dfu.copy()
 
-        # estatística
-        estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="mxu_est")
+        estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="tab2_mxu_est")
         stat_col = "media" if estat == "Média" else "mediana"
         if stat_col not in dfy.columns:
             st.error(f"Coluna '{stat_col}' não encontrada em univariadas.")
         else:
-            # variáveis
             var_opts = sorted(dfy[col_var].dropna().astype(str).unique().tolist())
-            vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(10, len(var_opts))], key="mxu_vars")
+            vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(10, len(var_opts))], key="tab2_mxu_vars")
 
             if vars_sel:
                 dfy["_cl_code"] = dfy[col_clu].apply(_to_int_code)
                 dfc = dfy[dfy["_cl_code"].isin([0,1,2,3]) & dfy[col_var].isin(vars_sel)].copy()
 
-                # Tabela — Cluster (linhas) × Variável (colunas)
                 piv = dfc.pivot_table(index="_cl_code", columns=col_var, values=stat_col, aggfunc="first").sort_index()
                 piv.index = [label_map.get(int(i), str(i)) for i in piv.index]
                 st.markdown("**Tabela — Valor por cluster (0–3)**")
@@ -1570,7 +1580,6 @@ with tab2:
                             f"univariadas_{ver_uni}_{stat_col}"
                             f"{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster")
 
-                # Resumo (describe) das variáveis selecionadas (distribuição dos 4 clusters)
                 desc = (
                     dfc[[col_var, stat_col]]
                     .groupby(col_var)[stat_col]
@@ -1589,10 +1598,6 @@ with tab2:
 
     # ------------------------------------------
     # 2.2) Métricas avançadas (cluster como fator 0–3)
-    #     - descritiva por cluster
-    #     - omnibus: ANOVA (eta²) e Kruskal
-    #     - correlações: Spearman, Gini, R² (y ~ cluster_code)
-    #     - pares: Welch t-test, Mann-Whitney, Cohen’s d, Cliff’s delta, FDR-BH
     # ------------------------------------------
     st.subheader("🧪 Métricas avançadas — cluster (0–3)")
 
@@ -1627,8 +1632,7 @@ with tab2:
         ss_tot = float(np.sum((y - y.mean()) ** 2))
         return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
 
-    def _eta_squared(groups: list[np.ndarray]) -> float:
-        # ANOVA eta² = SSB / SST
+    def _eta_squared(groups):
         sizes = [len(g) for g in groups if len(g) > 0]
         if sum(sizes) < 3: return np.nan
         all_vals = np.concatenate([g for g in groups if len(g) > 0])
@@ -1653,23 +1657,27 @@ with tab2:
         return (gt - lt) / n if n > 0 else np.nan
 
     def _bh_fdr(pvals_series: pd.Series) -> pd.Series:
-        p = pvals_series.values
+        p = pvals_series.values.astype(float)
+        m = len(p)
         idx = np.where(np.isfinite(p))[0]
         if len(idx) == 0:
             return pd.Series(np.nan, index=pvals_series.index)
+
         p_ok = p[idx]
-        order = np.argsort(p_ok)
+        order = np.argsort(p_ok)                    # crescente
         ranks = np.arange(1, len(p_ok) + 1, dtype=float)
-        q_ok = (p_ok[order] * len(p_ok)) / ranks
-        # torna monótona não-crescente de trás pra frente
-        for i in range(len(q_ok) - 2, -1, -1):
-            q_ok[order[i]] = min(q_ok[order[i]], q_ok[order[i + 1]])
-        q = np.full_like(p, np.nan, dtype=float)
-        q[idx] = np.clip(q_ok, 0, 1)
+
+        p_sorted = p_ok[order]
+        q_sorted = (p_sorted * len(p_ok)) / ranks   # BH
+        q_sorted = np.minimum.accumulate(q_sorted[::-1])[::-1]  # monotonicidade
+        q_sorted = np.clip(q_sorted, 0, 1)
+
+        q = np.full(m, np.nan, dtype=float)
+        q[idx[order]] = q_sorted
         return pd.Series(q, index=pvals_series.index)
 
     # 1) Escolha da versão e do arquivo de valores (por SQ)
-    ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="adv_ver")
+    ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="tab2_adv_ver")
     base_vals = pick_existing_dir(
         repo, branch,
         [f"Data/dados/{'originais' if ver_val=='originais' else 'winsorizados'}",
@@ -1680,9 +1688,9 @@ with tab2:
     if not vals_all:
         st.info(f"Nenhum arquivo de valores encontrado em `{base_vals}`.")
     else:
-        incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="adv_incl_pred")
+        incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="tab2_adv_incl_pred")
         vals_files = [f for f in vals_all if incl_pred or not f["name"].lower().startswith("pred_")]
-        sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="adv_vals_file")
+        sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="tab2_adv_vals_file")
         vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
         df_vals = load_parquet(repo, vals_obj["path"], branch) if vals_obj["name"].endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
 
@@ -1695,13 +1703,12 @@ with tab2:
             if ano_col_vals and 'year_sel' in locals():
                 df_vals = df_vals[pd.to_numeric(df_vals[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
 
-            # variáveis numéricas
             id_like = {c for c in df_vals.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
             time_like = {c for c in df_vals.columns if str(c).lower() in {"ano", "year"}}
             num_vars = [c for c in df_vals.columns if pd.api.types.is_numeric_dtype(df_vals[c])]
             var_opts = sorted([c for c in num_vars if c not in id_like | time_like])
 
-            vars_sel_adv = st.multiselect("Variáveis (0–3)", var_opts, default=var_opts[: min(10, len(var_opts))], key="adv_vars")
+            vars_sel_adv = st.multiselect("Variáveis (0–3)", var_opts, default=var_opts[: min(10, len(var_opts))], key="tab2_adv_vars")
             if vars_sel_adv:
                 # 3) Junta com os clusters e restringe 0..3
                 df_vals = df_vals[[sq_col_vals] + vars_sel_adv].copy()
@@ -1712,33 +1719,38 @@ with tab2:
                 # ---------- DESCRITIVA POR CLUSTER ----------
                 desc_rows = []
                 for v in vars_sel_adv:
-                    g = df_join[["_cl_code", v]].dropna()
+                    g_all = df_join[["_cl_code", v]]
                     for c_ in [0,1,2,3]:
-                        s = g.loc[g["_cl_code"] == c_, v].dropna()
+                        s_all = g_all.loc[g_all["_cl_code"] == c_, v]      # com NaN
+                        n_total_cluster = int(s_all.shape[0])
+                        s = s_all.dropna()                                   # sem NaN
                         n = int(s.shape[0])
-                        miss = int(g.shape[0] - n)
+                        miss = n_total_cluster - n
                         if n == 0:
                             desc_rows.append({"variavel": v, "cluster": c_, "n": 0, "missings": miss,
                                               "media": np.nan, "mediana": np.nan, "desvio_padrao": np.nan,
                                               "p25": np.nan, "p75": np.nan, "minimo": np.nan, "maximo": np.nan,
-                                              "coef_var": np.nan, "shapiro_p": np.nan})
+                                              "coef_var": np.nan, "shapiro_p": np.nan, "shapiro_sig": ""})
                             continue
                         mu = float(s.mean()); med = float(s.median()); sd = float(s.std(ddof=1))
                         p25 = float(np.percentile(s, 25)); p75 = float(np.percentile(s, 75))
                         mn, mx = float(s.min()), float(s.max())
                         cv = (sd / mu) if (np.isfinite(sd) and np.isfinite(mu) and abs(mu) > 1e-15) else np.nan
                         if _shapiro_fn is not None and n >= 3:
-                            try: sh_p = float(_shapiro_fn(s).pvalue)
-                            except Exception: sh_p = np.nan
+                            try:
+                                sh_p = float(_shapiro_fn(s).pvalue)
+                            except Exception:
+                                sh_p = np.nan
                         else:
                             sh_p = np.nan
                         desc_rows.append({"variavel": v, "cluster": c_, "n": n, "missings": miss,
                                           "media": mu, "mediana": med, "desvio_padrao": sd,
                                           "p25": p25, "p75": p75, "minimo": mn, "maximo": mx,
-                                          "coef_var": cv, "shapiro_p": sh_p})
+                                          "coef_var": cv, "shapiro_p": sh_p, "shapiro_sig": _sig_index(sh_p)})
                 df_desc = pd.DataFrame(desc_rows)
                 df_desc["cluster_label"] = df_desc["cluster"].map(label_map)
                 st.markdown("**Descritiva por cluster (0–3)**")
+                st.caption("Índice de significância (Shapiro): *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
                 st.dataframe(df_desc, use_container_width=True)
                 download_df(df_desc, f"descritiva_por_cluster_{ver_val}"
                                      f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
@@ -1754,40 +1766,33 @@ with tab2:
                                           "spearman_rho": np.nan, "spearman_p": np.nan,
                                           "gini_corr": np.nan, "r2_simple": np.nan})
                         continue
-                    # grupos
                     x0 = d.loc[d["_cl_code"] == 0, v].to_numpy()
                     x1 = d.loc[d["_cl_code"] == 1, v].to_numpy()
                     x2 = d.loc[d["_cl_code"] == 2, v].to_numpy()
                     x3 = d.loc[d["_cl_code"] == 3, v].to_numpy()
                     groups = [x0, x1, x2, x3]
 
-                    # ANOVA & eta²
                     if _anova_fn is not None and all(len(x) >= 2 for x in groups if len(x) > 0) and sum(len(x) for x in groups) >= 4:
                         try:
-                            Fv, pA = _anova_fn(*groups)
-                            Fv, pA = float(Fv), float(pA)
+                            Fv, pA = _anova_fn(*groups); Fv, pA = float(Fv), float(pA)
                         except Exception:
                             Fv, pA = np.nan, np.nan
                     else:
                         Fv, pA = np.nan, np.nan
                     eta2 = _eta_squared(groups)
 
-                    # Kruskal
                     if _kruskal_fn is not None and all(len(x) >= 1 for x in groups if len(x) > 0):
                         try:
-                            Hv, pK = _kruskal_fn(*[g for g in groups if len(g) > 0])
-                            Hv, pK = float(Hv), float(pK)
+                            Hv, pK = _kruskal_fn(*[g for g in groups if len(g) > 0]); Hv, pK = float(Hv), float(pK)
                         except Exception:
                             Hv, pK = np.nan, np.nan
                     else:
                         Hv, pK = np.nan, np.nan
 
-                    # Correlações com o código 0..3
                     x = d[v].to_numpy(); c = d["_cl_code"].to_numpy()
                     if _spearman_fn is not None and len(d) >= 3:
                         try:
-                            rho, pS = _spearman_fn(x, c, nan_policy="omit")
-                            rho, pS = float(rho), float(pS)
+                            rho, pS = _spearman_fn(x, c, nan_policy="omit"); rho, pS = float(rho), float(pS)
                         except Exception:
                             rho = d[v].corr(d["_cl_code"], method="spearman"); pS = np.nan
                     else:
@@ -1801,7 +1806,13 @@ with tab2:
                                       "spearman_rho": rho, "spearman_p": pS,
                                       "gini_corr": gini, "r2_simple": r2s})
                 df_omni = pd.DataFrame(omni_rows)
+                # Índice de significância
+                df_omni["anova_sig"] = df_omni["anova_p"].apply(_sig_index)
+                df_omni["kruskal_sig"] = df_omni["kruskal_p"].apply(_sig_index)
+                df_omni["spearman_sig"] = df_omni["spearman_p"].apply(_sig_index)
+
                 st.markdown("**Omnibus (ANOVA/Kruskal) e correlações vs cluster (0–3)**")
+                st.caption("Índice de significância: *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
                 st.dataframe(df_omni, use_container_width=True)
                 download_df(df_omni, f"omnibus_correlacoes_{ver_val}"
                                      f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
@@ -1822,8 +1833,7 @@ with tab2:
 
                         if _ttest_fn is not None and nA >= 2 and nB >= 2:
                             try:
-                                t_stat, p_t = _ttest_fn(xa, xb, equal_var=False)
-                                t_stat, p_t = float(t_stat), float(p_t)
+                                t_stat, p_t = _ttest_fn(xa, xb, equal_var=False); t_stat, p_t = float(t_stat), float(p_t)
                             except Exception:
                                 t_stat, p_t = np.nan, np.nan
                         else:
@@ -1831,8 +1841,7 @@ with tab2:
 
                         if _mw_fn is not None and nA >= 1 and nB >= 1:
                             try:
-                                U, p_mw = _mw_fn(xa, xb, alternative="two-sided")
-                                U, p_mw = float(U), float(p_mw)
+                                U, p_mw = _mw_fn(xa, xb, alternative="two-sided"); U, p_mw = float(U), float(p_mw)
                             except Exception:
                                 U, p_mw = np.nan, np.nan
                         else:
@@ -1853,93 +1862,333 @@ with tab2:
                         })
 
                 df_pw = pd.DataFrame(pw_rows)
+                # Ajuste FDR-BH + índices
                 if "p_t" in df_pw.columns:
                     df_pw["p_t_fdr_bh"] = _bh_fdr(df_pw["p_t"])
+                    df_pw["t_sig"] = df_pw["p_t"].apply(_sig_index)
+                    df_pw["t_sig_fdr"] = df_pw["p_t_fdr_bh"].apply(_sig_index)
+                if "p_mw" in df_pw.columns:
+                    df_pw["p_mw_fdr_bh"] = _bh_fdr(df_pw["p_mw"])
+                    df_pw["mw_sig"] = df_pw["p_mw"].apply(_sig_index)
+                    df_pw["mw_sig_fdr"] = df_pw["p_mw_fdr_bh"].apply(_sig_index)
+
                 df_pw["cluster_A_label"] = df_pw["cluster_A"].map(label_map)
                 df_pw["cluster_B_label"] = df_pw["cluster_B"].map(label_map)
 
                 st.markdown("**Comparações par-a-par entre clusters (0–3)**")
+                st.caption("Índice de significância (p e q=FDR-BH): *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
                 st.dataframe(df_pw, use_container_width=True)
                 download_df(df_pw, f"comparacoes_par_a_par_{ver_val}"
                                  f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
             else:
                 st.info("Selecione ao menos uma variável para calcular as métricas.")
 
+
 # -----------------------------------------------------------------------------
-# ABA 3 — Univariadas (somente leitura/exibição)
+# ABA 3 — Univariadas & Testes (lado a lado com índice de significância)
 # -----------------------------------------------------------------------------
 with tab3:
-    st.subheader("Seleção de versão e tipo de análise")
-    versao_u = st.radio(
-        "Versão", ["originais", "winsorizados"], index=0, horizontal=True, key="uni_ver"
-    )
-    base_u = pick_existing_dir(
-        repo,
-        branch,
-        ["Data/analises/original", "Data/analises/Original"]
-        if versao_u == "originais"
-        else ["Data/analises/winsorizados", "Data/analises/Winsorizados"],
-    )
-    analise_tipo = st.selectbox(
-        "Tipo de análise",
-        ["chi2", "spearman", "pearson", "ttest", "pairwise", "univariadas", "correlacao_matriz"],
-        key="uni_tipo",
-    )
+    st.subheader("📊 Univariadas & Testes — visão lado a lado com significância")
 
-    padroes = {
-        "chi2": (r"chi", r"chi2"),
-        "spearman": (r"spearman",),
-        "pearson": (r"pearson", r"correl"),
-        "ttest": (r"ttest", r"t-test"),
-        "pairwise": (r"pairwise",),
-        "univariadas": (r"univariad", r"descri", r"summary"),
-        "correlacao_matriz": (
-            r"corr(_|.*)matrix",
-            r"correlation(_|.*)matrix",
-            r"correlacao.*matriz",
-            r"pearson.*matrix",
-            r"spearman.*matrix",
-        ),
-    }
-    found = find_files_by_patterns(repo, branch, [base_u], patterns=padroes.get(analise_tipo, ()))
-    if not found:
-        st.info(f"Nenhum arquivo encontrado em `{base_u}` para {analise_tipo}.")
-    else:
-        sel_file = st.selectbox("Arquivo", [f["name"] for f in found], key="uni_file")
+    # ---------------- Helpers específicos da aba ----------------
+    def _bh_fdr(pvals_series: pd.Series) -> pd.Series:
+        """Benjamini–Hochberg FDR (q-values)."""
+        p = pd.to_numeric(pvals_series, errors="coerce").values
+        idx = np.where(np.isfinite(p))[0]
+        if len(idx) == 0:
+            return pd.Series(np.nan, index=pvals_series.index)
+        p_ok = p[idx]
+        order = np.argsort(p_ok)
+        ranks = np.arange(1, len(p_ok) + 1, dtype=float)
+        q_sorted = (p_ok[order] * len(p_ok)) / ranks
+        # correção monotônica (de trás pra frente)
+        for i in range(len(q_sorted) - 2, -1, -1):
+            q_sorted[i] = min(q_sorted[i], q_sorted[i + 1])
+        q = np.full_like(p, np.nan, dtype=float)
+        q[idx] = np.clip(q_sorted, 0, 1)
+        return pd.Series(q, index=pvals_series.index)
+
+    def _sig_stars(p_or_q: float) -> str:
+        """Índice de significância em estrelas."""
+        try:
+            x = float(p_or_q)
+        except Exception:
+            return "ns"
+        if not np.isfinite(x):
+            return "ns"
+        if x < 0.001: return "****"
+        if x < 0.01:  return "***"
+        if x < 0.05:  return "**"
+        if x < 0.10:  return "•"
+        return "ns"
+
+    def _first_col_like(df: pd.DataFrame, patterns: list[str]) -> str | None:
+        cols = list(df.columns)
+        low = [c.lower() for c in cols]
+        for pat in patterns:
+            for i, name in enumerate(low):
+                if re.search(pat, name):
+                    return cols[i]
+        return None
+
+    def _to_tidy_pairs(df_any: pd.DataFrame, analise_tipo: str) -> tuple[pd.DataFrame, str, str, str, str | None]:
+        """
+        Normaliza para formato 'longo' (pares):
+        retorna (df_long, col_i, col_j, col_stat, col_pval|None)
+        """
+        df = df_any.copy()
+
+        # Caso 1: matriz quadrada (correlações)
+        is_square = (df.shape[0] == df.shape[1]) and (set(df.columns.astype(str)) == set(df.index.astype(str)))
+        if is_square:
+            # tenta achar uma matriz de correlação; sem p-valores embutidos
+            df = df.copy()
+            df.index = df.index.astype(str)
+            df.columns = df.columns.astype(str)
+            df_long = df.reset_index().melt(id_vars=[df.index.name or "index"], var_name="var_b", value_name="stat")
+            df_long = df_long.rename(columns={df.index.name or "index": "var_a"})
+            # remove diagonal e duplicatas (mantém metade superior)
+            df_long = df_long[df_long["var_a"] != df_long["var_b"]]
+            # cria par ordenado para deduplicar
+            df_long["__pair_key"] = df_long.apply(
+                lambda r: tuple(sorted([str(r["var_a"]), str(r["var_b"])])), axis=1
+            )
+            df_long = df_long.drop_duplicates("__pair_key").drop(columns="__pair_key")
+            # sem p-valor disponível nessa forma
+            return df_long, "var_a", "var_b", "stat", None
+
+        # Caso 2: arquivo "pares" (linhas com A,B, estatística e p)
+        col_i = _first_col_like(df, [r"(var(_| )?a$)", r"(col(_| )?a$)", r"(^i$)", r"(feature.*a)", r"(var.?1$)", r"(col.?1$)", r"(^x$)"])
+        col_j = _first_col_like(df, [r"(var(_| )?b$)", r"(col(_| )?b$)", r"(^j$)", r"(feature.*b)", r"(var.?2$)", r"(col.?2$)", r"(^y$)"])
+        # fallback: colunas com dois primeiros campos categóricos
+        if col_i is None or col_j is None:
+            obj_cols = [c for c in df.columns if df[c].dtype.kind in ("O","U","S","b")]
+            if len(obj_cols) >= 2:
+                col_i, col_j = obj_cols[0], obj_cols[1]
+            else:
+                # tenta nomes genéricos usados em alguns exports
+                col_i = col_i or _first_col_like(df, [r"(var.*a|col.*a|i|x)"])
+                col_j = col_j or _first_col_like(df, [r"(var.*b|col.*b|j|y)"])
+        # estatística: rho/r/coef/t/chi2/valor
+        stat_candidates = [r"(^rho$)", r"(spearman)", r"(pearson)", r"(^r$)", r"(coef)", r"(^t(_| )?stat)", r"(^t$)", r"(chi2)", r"(stat.*)"]
+        col_stat = _first_col_like(df, stat_candidates)
+        # p-valor
+        p_candidates = [r"(^p(_?value)?$)", r"(p_?(mw|t|pearson|spearman))", r"(^pval)", r"(p-?value)"]
+        col_p = _first_col_like(df, p_candidates)
+
+        # Padroniza nomes e limpa
+        rename = {}
+        if col_i and col_i != "var_a": rename[col_i] = "var_a"
+        if col_j and col_j != "var_b": rename[col_j] = "var_b"
+        if col_stat and col_stat != "stat": rename[col_stat] = "stat"
+        if col_p and col_p != "pval": rename[col_p] = "pval"
+        if rename:
+            df = df.rename(columns=rename)
+
+        # Faz um recorte mínimo
+        keep = [c for c in ["var_a","var_b","stat","pval"] if c in df.columns]
+        if len(keep) < 3:
+            return pd.DataFrame(), "var_a", "var_b", "stat", "pval"
+        df_long = df[keep].copy()
+        return df_long, "var_a","var_b","stat", ("pval" if "pval" in df_long.columns else None)
+
+    def _make_matrix(df_pairs: pd.DataFrame, col_i: str, col_j: str, col_val: str, sym_max=True):
+        try:
+            M = pairs_to_matrix(df_pairs, col_i, col_j, col_val, sym_max=sym_max)
+            # ordena e alinha linhas/colunas
+            idx = sorted(M.index.astype(str))
+            M = M.reindex(index=idx, columns=idx)
+            return M
+        except Exception:
+            return None
+
+    # ---------------- Controles (lado esquerdo) ----------------
+    c0, c1 = st.columns([1.2, 1])
+    with c0:
+        versao_u = st.radio("Versão dos dados", ["originais", "winsorizados"], index=0, horizontal=True, key="uni_ver_v2")
+        base_u = pick_existing_dir(
+            repo,
+            branch,
+            ["Data/analises/original", "Data/analises/Original"] if versao_u == "originais"
+            else ["Data/analises/winsorizados", "Data/analises/Winsorizados"],
+        )
+        analise_tipo = st.selectbox(
+            "Tipo de análise",
+            ["chi2", "spearman", "pearson", "ttest", "pairwise", "univariadas", "correlacao_matriz"],
+            key="uni_tipo_v2",
+        )
+        padroes = {
+            "chi2": (r"chi", r"chi2"),
+            "spearman": (r"spearman",),
+            "pearson": (r"pearson", r"correl"),
+            "ttest": (r"ttest", r"t-test"),
+            "pairwise": (r"pairwise",),
+            "univariadas": (r"univariad", r"descri", r"summary"),
+            "correlacao_matriz": (
+                r"corr(_|.*)matrix", r"correlation(_|.*)matrix",
+                r"correlacao.*matriz", r"pearson.*matrix", r"spearman.*matrix",
+            ),
+        }
+        found = find_files_by_patterns(repo, branch, [base_u], patterns=padroes.get(analise_tipo, ()))
+        if not found:
+            st.info(f"Nenhum arquivo encontrado em `{base_u}` para {analise_tipo}.")
+            st.stop()
+        sel_file = st.selectbox("Arquivo", [f["name"] for f in found], key="uni_file_v2")
         fobj = next(x for x in found if x["name"] == sel_file)
         df_any = load_tabular(repo, fobj["path"], branch)
-        st.dataframe(df_any, use_container_width=True)
-        download_df(df_any, f"{analise_tipo}_{versao_u}")
 
-        if analise_tipo in ("spearman", "pearson", "correlacao_matriz"):
-            if (df_any.shape[0] == df_any.shape[1]) and (
-                set(df_any.columns) == set(df_any.index.astype(str))
-            ):
-                fig = px.imshow(
-                    df_any, text_auto=False, color_continuous_scale="Inferno", title=f"Heatmap — {analise_tipo}"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+    with c1:
+        st.markdown("**Ajustes de significância**")
+        alpha = st.slider("α (nível)", 0.001, 0.10, 0.05, step=0.001, key="uni_alpha")
+        use_fdr = st.checkbox("Ajustar múltiplas comparações (FDR-BH)", value=True, key="uni_use_fdr")
+        heat_mode = st.radio("Heatmap colorido por:", ["coeficiente/estatística", "-log10(p) / -log10(q)"], index=0, key="uni_hm_mode")
+
+    st.caption(f"Fonte: `{base_u}/{sel_file}`")
+
+    # ---------------- Normalização e cálculo de significância ----------------
+    # 1) Arquivos de 'univariadas' (descritivas por variável)
+    if analise_tipo == "univariadas":
+        st.markdown("### Visão lado a lado")
+        a, b = st.columns([1.6, 2.4])
+
+        with a:
+            st.markdown("**Pré-visualização**")
+            st.dataframe(df_any.head(50), use_container_width=True)
+            download_df(df_any, f"univariadas_{versao_u}")
+
+            # detecta colunas estatísticas usuais
+            c_var = _first_col_like(df_any, [r"(^variavel$)", r"(feature|atributo|coluna)"])
+            numeric_cols = [c for c in df_any.columns if pd.api.types.is_numeric_dtype(df_any[c])]
+            sel_stats = st.multiselect(
+                "Colunas numéricas para exibir",
+                numeric_cols,
+                default=[c for c in numeric_cols if re.search(r"(media|mediana|desvio|min|max|p25|p75)", c.lower())][:6],
+                key="uni_u_cols",
+            )
+        with b:
+            if c_var and sel_stats:
+                df_show = df_any[[c_var] + sel_stats].copy().rename(columns={c_var: "variavel"})
+                st.markdown("**Resumo por variável**")
+                st.dataframe(df_show, use_container_width=True)
+                download_df(df_show, f"univariadas_{versao_u}_resumo")
             else:
-                cand_i = next((c for c in df_any.columns if re.search(r"(var|col).*a", c.lower())), None)
-                cand_j = next((c for c in df_any.columns if re.search(r"(var|col).*b", c.lower())), None)
-                cand_r = next(
-                    (
-                        c
-                        for c in df_any.columns
-                        if any(k in c.lower() for k in ["rho", "pearson", "spearman", "corr", "coef"])
-                    ),
-                    None,
-                )
-                if cand_i and cand_j and cand_r:
-                    M = pairs_to_matrix(df_any, cand_i, cand_j, cand_r, sym_max=True)
-                    if M is not None:
-                        fig = px.imshow(
-                            M,
-                            text_auto=False,
-                            color_continuous_scale="Inferno",
-                            title=f"Heatmap — {analise_tipo} (pares → matriz)",
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                st.info("Selecione ao menos uma coluna numérica.")
+
+        st.info("Este arquivo não traz p-valores; aqui mostramos descritivas. Se quiser significância, use os resultados de **chi2/ttest/spearman/pearson/pairwise**.")
+        st.stop()
+
+    # 2) Demais testes → converter para pares e calcular estrelas
+    df_pairs, col_i, col_j, col_stat, col_p = _to_tidy_pairs(df_any, analise_tipo)
+    if df_pairs.empty or col_i not in df_pairs.columns or col_j not in df_pairs.columns or col_stat not in df_pairs.columns:
+        st.warning("Não foi possível inferir as colunas de pares/estatística. Exibindo arquivo bruto.")
+        st.dataframe(df_any, use_container_width=True)
+        download_df(df_any, f"{analise_tipo}_{versao_u}_raw")
+        st.stop()
+
+    # garante tipos
+    df_pairs[col_stat] = pd.to_numeric(df_pairs[col_stat], errors="coerce")
+    if col_p and col_p in df_pairs.columns:
+        df_pairs[col_p] = pd.to_numeric(df_pairs[col_p], errors="coerce")
+
+    # calcula q-value (FDR) se houver p
+    if col_p and df_pairs[col_p].notna().any():
+        df_pairs["pval"] = df_pairs[col_p]
+        if use_fdr:
+            df_pairs["qval"] = _bh_fdr(df_pairs["pval"])
+            df_pairs["sig_ref"] = df_pairs["qval"]
+            df_pairs["sig_kind"] = "q (FDR-BH)"
+        else:
+            df_pairs["qval"] = np.nan
+            df_pairs["sig_ref"] = df_pairs["pval"]
+            df_pairs["sig_kind"] = "p"
+        df_pairs["sig"] = df_pairs["sig_ref"].apply(_sig_stars)
+        df_pairs["significante"] = (df_pairs["sig_ref"] <= alpha).astype(int)
+        have_p = True
+    else:
+        # sem p: apenas exibe estatística, sem índice de significância
+        df_pairs["sig"] = "—"
+        df_pairs["significante"] = np.nan
+        df_pairs["sig_kind"] = "—"
+        have_p = False
+
+    # ---------------- Layout lado a lado ----------------
+    left, mid, right = st.columns([1.1, 2, 2.2], gap="large")
+
+    # (1) Cards/Resumo
+    with left:
+        st.markdown("#### 🔎 Resumo")
+        total_tests = int(len(df_pairs))
+        st.metric("Testes (pares)", total_tests)
+
+        if have_p:
+            n_sig = int((df_pairs["sig_ref"] <= alpha).sum())
+            perc = (n_sig / total_tests * 100.0) if total_tests else 0.0
+            st.metric(f"Significantes (α={alpha:g}, {df_pairs['sig_kind'].iloc[0]})", f"{n_sig} ({perc:.1f}%)")
+            # top efeitos (por módulo da estatística)
+            topK = min(5, total_tests)
+            sub_top = df_pairs.dropna(subset=[col_stat]).copy()
+            sub_top["abs_stat"] = sub_top[col_stat].abs()
+            top_eff = sub_top.sort_values("abs_stat", ascending=False).head(topK)[[col_i, col_j, col_stat] + (["pval","qval"] if "pval" in sub_top.columns else [])]
+            st.markdown("**Maiores efeitos (|estatística|)**")
+            st.dataframe(top_eff, use_container_width=True)
+        else:
+            st.caption("Sem p-valores neste arquivo — exibindo apenas estatísticas.")
+
+        st.markdown("**Legenda do índice**")
+        st.write("`**** <0.001`, `*** <0.01`, `** <0.05`, `• <0.10`, `ns ≥0.10`")
+
+    # (2) Tabela filtrável
+    with mid:
+        st.markdown("#### 📋 Tabela — pares com índice de significância")
+        # filtros rápidos
+        vars_all = sorted(set(df_pairs[col_i].astype(str)) | set(df_pairs[col_j].astype(str)))
+        sub_i = st.selectbox("Filtrar por variável A (opcional)", ["(todas)"] + vars_all, index=0, key="uni_f_i")
+        sub_j = st.selectbox("Filtrar por variável B (opcional)", ["(todas)"] + vars_all, index=0, key="uni_f_j")
+
+        df_show = df_pairs.copy()
+        if sub_i != "(todas)":
+            df_show = df_show[df_show[col_i].astype(str) == sub_i]
+        if sub_j != "(todas)":
+            df_show = df_show[df_show[col_j].astype(str) == sub_j]
+
+        cols_out = [col_i, col_j, col_stat, "sig"]
+        if "pval" in df_show.columns: cols_out += ["pval"]
+        if "qval" in df_show.columns: cols_out += ["qval"]
+        if "significante" in df_show.columns: cols_out += ["significante"]
+
+        st.dataframe(df_show[cols_out].sort_values(by=col_stat, ascending=False), use_container_width=True)
+        download_df(df_show[cols_out], f"{analise_tipo}_{versao_u}_pares")
+
+    # (3) Heatmap (coeficiente/estatística OU -log10(p/q))
+    with right:
+        st.markdown("#### 🔥 Heatmap")
+        # matriz do coeficiente/estatística
+        M_stat = _make_matrix(df_pairs[[col_i, col_j, col_stat]].dropna(), col_i, col_j, col_stat, sym_max=True)
+
+        # matriz de significância (p ou q) transformada em -log10
+        M_sig = None
+        if have_p:
+            ref_col = "qval" if (use_fdr and "qval" in df_pairs.columns) else "pval"
+            df_tmp = df_pairs[[col_i, col_j, ref_col]].dropna().copy()
+            df_tmp["mlog10"] = -np.log10(df_tmp[ref_col].clip(lower=1e-300))
+            M_sig = _make_matrix(df_tmp[[col_i, col_j, "mlog10"]], col_i, col_j, "mlog10", sym_max=True)
+
+        if heat_mode == "coeficiente/estatística" and M_stat is not None:
+            fig = px.imshow(M_stat, color_continuous_scale="Inferno", title="Heatmap — estatística/coeficiente")
+            st.plotly_chart(fig, use_container_width=True)
+            download_plotly_png(fig, f"heatmap_{analise_tipo}_estat")
+        elif heat_mode != "coeficiente/estatística" and (M_sig is not None):
+            fig = px.imshow(M_sig, color_continuous_scale="Inferno", title=f"Heatmap — -log10({'q' if use_fdr else 'p'})")
+            st.plotly_chart(fig, use_container_width=True)
+            download_plotly_png(fig, f"heatmap_{analise_tipo}_log10sig")
+        else:
+            st.info("Não foi possível montar a matriz para o heatmap com os dados fornecidos.")
+
+    # ---------------- Rodapé: preview do arquivo bruto (debug) ----------------
+    with st.expander("🔎 Debug — preview do arquivo bruto"):
+        st.dataframe(df_any.head(100), use_container_width=True)
+        download_df(df_any, f"{analise_tipo}_{versao_u}_raw_preview")
+
 
 # -----------------------------------------------------------------------------
 # ABA 4 — PCA (em arquivo separado)
@@ -1953,6 +2202,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
