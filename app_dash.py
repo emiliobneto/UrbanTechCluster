@@ -1403,7 +1403,7 @@ with tab2:
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
 
-        # ---------- quadras (somente colunas necessárias) ----------
+    # ---------- quadras (somente colunas necessárias) ----------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
@@ -1412,81 +1412,81 @@ with tab2:
         except Exception as e:
             st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
             st.stop()
-    
+
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not join_quad:
         st.error("A camada de quadras não possui coluna 'SQ'."); st.stop()
-    
-    # Mantém só geometry + SQ (GERAL, sem recorte)
-    geom_col = gdf_quadras.geometry.name
-    gdfq_all = gdf_quadras[[join_quad, geom_col]].copy()
-    gdfq_all["_SQ_norm"] = gdfq_all[join_quad].apply(_norm_sq_6)
-    
-    # ---------- (opcional) Recorte (gera um subconjunto, sem mexer no GERAL) ----------
+
+    # Mantém só geometry + SQ (NÃO filtre aqui por recorte)
+    gdfq_full = gdf_quadras[[join_quad, gdf_quadras.geometry.name]].copy()
+    gdfq_full["_SQ_norm"] = gdfq_full[join_quad].apply(_norm_sq_6)
+
+    # ---------- normaliza SQ e resolve duplicados ----------
+    df_est = df_est.copy()
+    df_est["_SQ_norm"] = df_est[join_est].apply(_norm_sq_6)
+    df_est["_cl_code"] = df_est[cluster_col].apply(_to_int_code).fillna(-1)
+    df_est = df_est.sort_values(["_SQ_norm", "_cl_code"])      # maior estágio por último
+    df_est_dedup = df_est.drop_duplicates("_SQ_norm", keep="last")
+
+    # ---------- merge base (sem recorte) ----------
+    gdfc_base = gdfq_full.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
+
+    # mapping de labels e paleta
+    def _attach_colors(gdf_in: "GeoDataFrame") -> "GeoDataFrame":
+        g = gdf_in.copy()
+        g["_cl_code_clean"] = g["_cl_code"].where(g["_cl_code"].isin([0, 1, 2, 3]))
+        _codes = g["_cl_code_clean"].astype("Int64")
+        lbl_mapped = _codes.map(label_map)
+        g["cluster_lbl"] = lbl_mapped.fillna(g[cluster_col].astype("string"))
+
+        # ordem da legenda (0→3 primeiro, depois outras categorias se houver)
+        codes_present = [int(x) for x in _codes.dropna().unique().tolist()]
+        labels_from_codes = [label_map[c] for c in sorted(codes_present)]
+        other_labels = sorted([l for l in g["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
+        cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
+
+        palette = pick_categorical(len(cats_sorted))
+        cmap_local = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
+        g["fill_color"] = g["cluster_lbl"].apply(lambda lab: hex_to_rgba(cmap_local.get(lab, "#999999")))
+        return g, cats_sorted, cmap_local
+
+    # aplica paleta na base (mapa geral)
+    gdfc_main, cats_sorted, cmap = _attach_colors(gdfc_base)
+
+    # ---------- (opcional) Recorte (NÃO altera o gdfc_main) ----------
     st.markdown("#### Mapa — Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
     rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
     gdf_rec = None
-    gdfq_rec = None
-    
+    gdfc_rec = None
     if rec_files:
-        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files],
-                               index=0, key="clu_rec_file")
+        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files], index=0, key="clu_rec_file")
         if rec_sel != "(sem recorte)":
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-            join_rec = next((c for c in gdf_rec.columns if str(c).upper() == "SQ"), None)
-            if join_rec:
-                gdf_rec = gdf_rec.copy()
-                gdf_rec["_SQ_norm"] = gdf_rec[join_rec].apply(_norm_sq_6)
-                sq_keep = set(gdf_rec["_SQ_norm"].dropna().unique().tolist())
-                gdfq_rec = gdfq_all[gdfq_all["_SQ_norm"].isin(sq_keep)].copy()
-    
-    # ---------- merge + estilização em função para reusar ----------
-    def _build_colored(gdfq_subset: "GeoDataFrame"):
-        g = gdfq_subset.merge(
-            df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]],
-            on="_SQ_norm", how="left"
-        )
-        # mantém apenas 0..3 e rotula
-        g["_cl_code_clean"] = g["_cl_code"].where(g["_cl_code"].isin([0, 1, 2, 3]))
-        codes = g["_cl_code_clean"].astype("Int64")
-        lbl = codes.map(label_map)
-        g["cluster_lbl"] = lbl.fillna(g[cluster_col].astype("string"))
-    
-        # paleta (0→3 primeiro, depois quaisquer outras categorias)
-        codes_present = [int(x) for x in codes.dropna().unique().tolist()]
-        labels_from_codes = [label_map[c] for c in sorted(codes_present)]
-        other_labels = sorted([l for l in g["cluster_lbl"].dropna().unique()
-                               if l not in labels_from_codes], key=str)
-        cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
-        palette = pick_categorical(len(cats_sorted))
-        local_cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
-    
-        g = g[[geom_col, "_SQ_norm", "cluster_lbl"]].copy()
-        g["fill_color"] = g["cluster_lbl"].apply(lambda lab: hex_to_rgba(local_cmap.get(lab, "#999999")))
-        if simplify_tol and simplify_tol > 0:
+
+            # Determina SQs do recorte sem mexer no dataset geral
             try:
-                g[geom_col] = g[geom_col].simplify(simplify_tol, preserve_topology=True)
-            except Exception:
-                pass
-        return g, cats_sorted, local_cmap
-    
-    # GERAL
-    gdfc_main, cats_sorted, cmap = _build_colored(gdfq_all)
-    geojson_main = make_geojson(gdfc_main)
-    
-    # RECORTE (se houver)
-    gdfc_rec = None
-    if gdfq_rec is not None:
-        gdfc_rec, _, _ = _build_colored(gdfq_rec)
-    
-    # ---------- MAPAS ----------
+                import geopandas as gpd
+                gq = ensure_wgs84(gdfq_full[[gdfq_full.geometry.name, "_SQ_norm"]])
+                gr = ensure_wgs84(gdf_rec[["geometry"]].copy())
+                try:
+                    sq_keep = gpd.sjoin(gq, gr, predicate="intersects", how="inner")["_SQ_norm"].unique().tolist()
+                except Exception:
+                    bbox = gr.total_bounds
+                    sq_keep = gq.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]]["_SQ_norm"].unique().tolist()
+            except Exception as e:
+                st.error(f"Falha ao cruzar recorte com SQs: {e}")
+                sq_keep = []
+
+            gdfc_rec = gdfc_main[gdfc_main["_SQ_norm"].isin(sq_keep)].copy()
+
+    # ---------- GeoJSON & MAPAS ----------
     colM, colL = st.columns([4.5, 1], gap="large")
     with colM:
-        st.markdown("#### Mapa — Clusters por SQ (GERAL)")
-        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
-                            index=0, horizontal=True, key="clu_base")
+        st.markdown("#### Mapa — Clusters por SQ (geral)")
+        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+        geojson_main = make_geojson(gdfc_main[[gdfc_main.geometry.name, "cluster_lbl", "fill_color"]])
         lyr = render_geojson_layer(geojson_main, name="clusters")
         if base_map.startswith("Satélite"):
             deck([lyr], satellite=True)
@@ -1496,11 +1496,11 @@ with tab2:
         st.markdown("**Legenda — Estágio**")
         for lab in cats_sorted:
             _legend_row(cmap[lab], lab)
-    
-    # mapa do RECORTE (apenas se houver)
-    if gdf_rec is not None and gdfc_rec is not None:
+
+    # ---------- mapa do recorte (se houver) com MESMAS cores ----------
+    if gdf_rec is not None and gdfc_rec is not None and not gdfc_rec.empty:
         st.markdown("#### Mapa — Recorte selecionado")
-        geojson_rec = make_geojson(gdfc_rec)
+        geojson_rec = make_geojson(gdfc_rec[[gdfc_rec.geometry.name, "cluster_lbl", "fill_color"]])
         lyr_rec = render_geojson_layer(geojson_rec, name="clusters_recorte")
         border = render_line_layer(make_geojson(gdf_rec), name="recorte")
         colRm, colRl = st.columns([4.5, 1], gap="large")
@@ -1513,111 +1513,79 @@ with tab2:
             st.markdown("**Legenda — Recorte**")
             for lab in cats_sorted:
                 _legend_row(cmap[lab], lab)
+
     
     st.divider()
 
+    # ------------------------------------------
+    # 2.x) Métricas por cluster — a partir de univariadas.parquet
+    # ------------------------------------------
+    st.subheader("Métricas por cluster — univariadas")
 
-# ------------------------------------------
-# 2.x) Métricas por cluster — univariadas.parquet (originais/winsorizados)
-# ------------------------------------------
-st.subheader("Métricas por cluster — univariadas")
+    def _load_univariadas(version: str) -> pd.DataFrame:
+        base = "Data/analises/original" if version == "originais" else "Data/analises/winsorizados"
+        path = f"{base}/univariadas.parquet"
+        return load_parquet(repo, path, branch)
 
-# escolha de versão
-ver_sel = st.radio("Versão dos dados", ["originais", "winsorizados"], horizontal=True, key="mx_ver")
+    ver_uni = st.radio("Versão", ["originais", "winsorizados"], horizontal=True, key="mxu_ver")
+    dfu = _load_univariadas(ver_uni)
+    st.caption(f"Fonte: `Data/analises/{'original' if ver_uni=='originais' else 'winsorizados'}/univariadas.parquet`")
 
-# caminhos fixos informados por você
-UNI_PATHS = {
-    "originais":   "Data/analises/original/univariadas.parquet",
-    "winsorizados":"Data/analises/winsorizados/univariadas.parquet",
-}
-uni_path = UNI_PATHS[ver_sel]
-
-# carrega
-try:
-    dfu = load_parquet(repo, uni_path, branch)
-    st.caption(f"Fonte: `{uni_path}`")
-except Exception as e:
-    st.error(f"Não foi possível ler {uni_path}: {e}")
-    dfu = None
-
-if dfu is not None and not dfu.empty:
-    # tenta detectar Ano (se não existir, o filtro é omitido)
-    ano_col = next((c for c in dfu.columns if str(c).lower() in ("ano", "year")), None)
-    if ano_col:
-        anos = pd.to_numeric(dfu[ano_col], errors="coerce").dropna().astype(int).unique().tolist()
-        anos = sorted(anos)
-        ano_sel = st.select_slider("Ano", options=anos, value=anos[-1], key="mx_ano")
-        dfy = dfu[pd.to_numeric(dfu[ano_col], errors="coerce").astype("Int64") == ano_sel].copy()
+    # colunas chave
+    col_var = next((c for c in dfu.columns if str(c).lower() == "variavel"), None)
+    col_clu = next((c for c in dfu.columns if str(c).lower() == "cluster"), None)
+    col_ano = next((c for c in dfu.columns if str(c).lower() in ("ano","year")), None)
+    if not (col_var and col_clu):
+        st.error("Arquivo univariadas precisa conter colunas 'variavel' e 'cluster'.")
     else:
-        ano_sel = None
-        dfy = dfu.copy()
-
-    # estatística alvo e variáveis
-    estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="mx_estat")
-    var_opts = sorted(dfy["variavel"].dropna().astype(str).unique().tolist())
-    vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(8, len(var_opts))], key="mx_vars")
-
-    # cluster 0..3
-    def _to_int_cluster(x):
-        try:
-            return int(float(str(x).strip()))
-        except Exception:
-            return _to_int_code(x)
-
-    dfy["_cl_code"] = dfy["cluster"].apply(_to_int_cluster)
-    dfc = dfy[dfy["_cl_code"].isin([0, 1, 2, 3])].copy()
-
-    if vars_sel:
-        # TABELA 1 — valor por cluster (0–3) para as variáveis selecionadas
-        val_col = "media" if estat == "Média" else "mediana"
-        piv = (
-            dfc[dfc["variavel"].isin(vars_sel)]
-            .pivot_table(index="_cl_code", columns="variavel", values=val_col, aggfunc="first")
-            .sort_index()
-        )
-        # n_SQ: mediana dos 'n' por cluster (entre as variáveis escolhidas)
-        n_by_clu = (
-            dfc[dfc["variavel"].isin(vars_sel)]
-            .groupby("_cl_code")["n"].median()
-            .rename("n_SQ")
-        )
-        tbl = piv.join(n_by_clu, how="left")
-        tbl.index = [label_map.get(int(i), str(i)) for i in tbl.index]
-
-        st.markdown("**Tabela 1 — Valor por cluster (0–3)**")
-        st.dataframe(tbl, use_container_width=True)
-        download_df(
-            tbl.reset_index().rename(columns={"index": "Cluster"}),
-            f"univariadas_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
-            f"{'_'+str(ano_sel) if ano_sel is not None else ''}_por_cluster"
-        )
-
-        # TABELA 2 — Resumo das variáveis selecionadas (do ano, se existir)
-        # Para média: agregamos média ponderada por 'n' por variável;
-        # Para mediana: mediana das medianas por variável.
-        if estat == "Média":
-            resumo = (
-                dfc[dfc["variavel"].isin(vars_sel)]
-                .groupby("variavel")
-                .apply(lambda d: np.average(d["media"], weights=d["n"]))
-                .to_frame("media_global")
-            )
+        # filtro de ano (se houver)
+        if col_ano and dfu[col_ano].notna().any():
+            anos = pd.to_numeric(dfu[col_ano], errors="coerce").dropna().astype(int).unique().tolist()
+            anos = sorted(anos)
+            ano_uni = st.select_slider("Ano", options=anos, value=anos[-1], key="mxu_ano")
+            dfy = dfu[pd.to_numeric(dfu[col_ano], errors="coerce").astype("Int64") == ano_uni].copy()
         else:
-            resumo = (
-                dfc[dfc["variavel"].isin(vars_sel)]
-                .groupby("variavel")["mediana"].median()
-                .to_frame("mediana_global")
-            )
+            ano_uni = None
+            dfy = dfu.copy()
 
-        st.markdown("**Tabela 2 — Resumo das variáveis selecionadas**")
-        st.dataframe(resumo, use_container_width=True)
-        download_df(
-            resumo.reset_index(),
-            f"resumo_univariadas_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
-            f"{'_'+str(ano_sel) if ano_sel is not None else ''}"
-        )
-    else:
-        st.info("Selecione ao menos uma variável para montar as tabelas.")
+        # estatística
+        estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="mxu_est")
+        stat_col = "media" if estat == "Média" else "mediana"
+        if stat_col not in dfy.columns:
+            st.error(f"Coluna '{stat_col}' não encontrada em univariadas.")
+        else:
+            # variáveis
+            var_opts = sorted(dfy[col_var].dropna().astype(str).unique().tolist())
+            vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(10, len(var_opts))], key="mxu_vars")
+
+            if vars_sel:
+                dfy["_cl_code"] = dfy[col_clu].apply(_to_int_code)
+                dfc = dfy[dfy["_cl_code"].isin([0,1,2,3]) & dfy[col_var].isin(vars_sel)].copy()
+
+                # Tabela 1 — Cluster (linhas) × Variável (colunas)
+                piv = dfc.pivot_table(index="_cl_code", columns=col_var, values=stat_col, aggfunc="first").sort_index()
+                piv.index = [label_map.get(int(i), str(i)) for i in piv.index]
+                st.markdown("**Tabela 1 — Valor por cluster (0–3)**")
+                st.dataframe(piv, use_container_width=True)
+                download_df(piv.reset_index().rename(columns={"index":"Cluster"}),
+                            f"univariadas_{ver_uni}_{stat_col}"
+                            f"{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster")
+
+                # Tabela 2 — Resumo (describe) das variáveis selecionadas, no ano e estatística escolhidos
+                # (distribuição entre os 4 clusters)
+                desc = (
+                    dfc[[col_var, stat_col]]
+                    .groupby(col_var)[stat_col]
+                    .describe()
+                    .rename_axis("variavel")
+                    .reset_index()
+                )
+                st.markdown("**Tabela 2 — Resumo das variáveis selecionadas (ano/estatística escolhidos)**")
+                st.dataframe(desc, use_container_width=True)
+                download_df(desc, f"univariadas_{ver_uni}_{stat_col}"
+                                   f"{'_'+str(ano_uni) if ano_uni is not None else ''}_resumo")
+            else:
+                st.info("Selecione ao menos uma variável.")
 
 
 # -----------------------------------------------------------------------------
@@ -1708,6 +1676,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
