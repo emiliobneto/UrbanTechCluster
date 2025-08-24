@@ -1724,60 +1724,6 @@ with tab2:
                 else:
                     st.info("Selecione ao menos uma variável.")
 
-    # ------------------------------------------
-    # 2.x) Spearman (pares) — somente TABELA
-    # ------------------------------------------
-    st.subheader("Spearman (pares) — tabela")
-    
-    base_sp = pick_existing_dir(
-        repo, branch,
-        ["Data/analises/original", "Data/Analises/original", "data/analises/original"]
-    )
-    df_sp = None
-    
-    # procura arquivos com 'spearman' e 'pairs'
-    sp_candidates = [
-        f for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
-        if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
-    ]
-    
-    # fallback para winsorizados, se necessário
-    if not sp_candidates:
-        base_sp_alt = pick_existing_dir(
-            repo, branch,
-            ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"]
-        )
-        sp_candidates = [
-            f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet"))
-            if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
-        ]
-    
-    if sp_candidates:
-        sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])
-        sp_sel = st.selectbox(
-            "Selecione arquivo Spearman (pares)",
-            [f["name"] for f in sp_candidates],
-            index=0,
-            key="clu_spear_pairs_sel"  # chave única
-        )
-        sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
-        st.caption(f"Spearman (pares): `{sp_obj['path']}`")
-    
-        df_sp = (
-            load_parquet(repo, sp_obj["path"], branch)
-            if sp_obj["name"].lower().endswith(".parquet")
-            else load_csv(repo, sp_obj["path"], branch)
-        )
-    
-        # mostra apenas a tabela + opção de download
-        st.dataframe(df_sp, use_container_width=True)
-        try:
-            base_nm = os.path.splitext(sp_obj["name"])[0]
-        except Exception:
-            base_nm = "spearman_pairs"
-        download_df(df_sp, f"{base_nm}_tabela")
-    else:
-        st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas (somente leitura/exibição)
 # -----------------------------------------------------------------------------
@@ -1866,6 +1812,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
