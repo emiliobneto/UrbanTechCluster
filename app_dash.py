@@ -1522,128 +1522,212 @@ with tab2:
 
     st.divider()
 
-    # ------------------------------------------
-    # 2.x) Métricas por cluster — tabela compilada
-    # ------------------------------------------
-    st.subheader("Métricas por cluster — tabela compilada")
+# ------------------------------------------
+# 2.x) Métricas por cluster — prefere `univariadas` (fallback `metrica`)
+# ------------------------------------------
+    st.subheader("Métricas por cluster — `univariadas` / `metrica`")
     
-    def _find_metrics_file(version: str):
-        """Retorna (base_dir, lista_de_arquivos_candidatos) conforme a versão."""
-        if version == "originais":
-            base_dir = pick_existing_dir(
-                repo, branch,
-                ["Data/analises/original", "Data/Analises/original", "data/analises/original"]
-            )
-            files = list_files(repo, base_dir, branch, (".csv", ".parquet"))
-            # preferência por 'metricas'
-            cand = [f for f in files if f["name"].lower() in ("metricas.csv","metricas.parquet")]
-            if not cand:
-                cand = [f for f in files if re.search(r"(?i)metrica|metrics", f["name"])]
-            return base_dir, cand
-        else:
-            base_dir = pick_existing_dir(
-                repo, branch,
-                ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"]
-            )
-            files = list_files(repo, base_dir, branch, (".csv", ".parquet"))
-            # arquivo alvo informado: analise_clusters__metrics_fact
-            cand = [f for f in files if re.fullmatch(r"(?i)analise_clusters__metrics_fact\.(csv|parquet)", f["name"])]
-            if not cand:
-                # fallback leve
-                cand = [f for f in files if "analise_clusters__metrics_fact" in f["name"].lower()]
-            return base_dir, cand
+    def _find_sources(version: str):
+        base_dir = pick_existing_dir(
+            repo, branch,
+            ["Data/analises/original", "Data/Analises/original", "data/analises/original"]
+            if version == "originais"
+            else ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"]
+        )
+        files = list_files(repo, base_dir, branch, (".csv", ".parquet"))
+        uni = [f for f in files if _re.search(r"(?i)univariad", f["name"])]
+        met = [f for f in files if (_re.fullmatch(r"(?i)metrica\.(csv|parquet)", f["name"])
+                                    or _re.search(r"(?i)analise_clusters__metrics_fact", f["name"])
+                                    or _re.search(r"(?i)\bmetrica\b", f["name"]))]
+        uni = sorted(uni, key=lambda x: x["name"])
+        met = sorted(met, key=lambda x: x["name"])
+        return base_dir, uni, met
     
-    def _best_cluster_col(columns):
-        cols = list(columns)
-        # preferências por nome
-        prefs = ["EstagioClusterizacao", "estagioclusterizacao", "cluster", "Cluster", "label", "Label"]
-        for p in prefs:
-            if p in cols:
-                return p
+    def _ano_col(cols):
         for c in cols:
-            if re.search(r"(?i)(cluster|estagio|label)", c):
+            if str(c).lower() in ("ano","year"):
                 return c
         return None
     
-    # UI de controle
-    ver_met = st.radio("Versão das métricas", ["originais", "winsorizados"], horizontal=True, key="clu_met_ver")
-    base_met, met_candidates = _find_metrics_file(ver_met)
+    def _as_df(obj):
+        return load_parquet(repo, obj["path"], branch) if obj["name"].lower().endswith(".parquet") else load_csv(repo, obj["path"], branch)
     
-    if met_candidates:
-        met_sel = st.selectbox(
-            "Arquivo de métricas",
-            [f["name"] for f in met_candidates],
-            index=0,
-            key="clu_met_file"
-        )
-        met_obj = next(x for x in met_candidates if x["name"] == met_sel)
-        dfm = load_parquet(repo, met_obj["path"], branch) if met_obj["name"].lower().endswith(".parquet") \
-              else load_csv(repo, met_obj["path"], branch)
-        st.caption(f"Fonte: `{met_obj['path']}`")
+    ver_sel = st.radio("Versão dos dados", ["originais", "winsorizados"], horizontal=True, key="mx_ver")
+    base_dir, uni_files, met_files = _find_sources(ver_sel)
     
-        # Detecta colunas-chave
-        ano_col = next((c for c in dfm.columns if c.lower() in ("ano","year")), None)
-        clu_col = _best_cluster_col(dfm.columns)
-        if clu_col is None:
-            st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
-        else:
-            # Filtro por ano (quando houver)
-            if ano_col is not None:
-                anos = pd.to_numeric(dfm[ano_col], errors="coerce").dropna().astype(int).unique().tolist()
+    # Fonte preferida
+    fonte_opts = []
+    if uni_files: fonte_opts.append("univariadas")
+    if met_files: fonte_opts.append("metrica")
+    if not fonte_opts:
+        st.info(f"Nenhum `univariadas` ou `metrica` encontrado em `{base_dir}`.")
+    else:
+        fonte_sel = st.radio("Fonte das estatísticas", fonte_opts, horizontal=True, index=0, key="mx_fonte")
+    
+        # Carrega arquivo escolhido
+        if fonte_sel == "univariadas":
+            uni_name = st.selectbox("Arquivo `univariadas`", [f["name"] for f in uni_files], index=0, key="mx_uni_file")
+            uni_obj = next(x for x in uni_files if x["name"] == uni_name)
+            dfu = _as_df(uni_obj)
+            st.caption(f"Fonte (univariadas): `{uni_obj['path']}`")
+    
+            # Ano
+            ano_c = _ano_col(dfu.columns)
+            if ano_c:
+                anos = pd.to_numeric(dfu[ano_c], errors="coerce").dropna().astype(int).unique().tolist()
                 anos = sorted(anos)
-                if anos:
-                    ano_sel = st.select_slider("Ano", options=anos, value=anos[-1], key="clu_met_ano")
-                    dfm = dfm[pd.to_numeric(dfm[ano_col], errors="coerce").astype("Int64") == ano_sel].copy()
-    
-            # Seleção de variáveis numéricas
-            id_like = {c for c in dfm.columns if c.lower() in {"sq","id","codigo","code"}}
-            drop_cols = id_like | {clu_col}
-            if ano_col is not None:
-                drop_cols.add(ano_col)
-            num_cols = [c for c in dfm.columns if pd.api.types.is_numeric_dtype(dfm[c]) and c not in drop_cols]
-            if not num_cols:
-                st.info("Nenhuma coluna numérica encontrada para agregação neste arquivo.")
+                ano_sel = st.select_slider("Ano", options=anos, value=anos[-1], key="mx_ano")
+                dfy = dfu[pd.to_numeric(dfu[ano_c], errors="coerce").astype("Int64") == ano_sel].copy()
             else:
-                vars_sel = st.multiselect("Variáveis", num_cols, default=num_cols[: min(6, len(num_cols))], key="clu_met_vars")
-                agg_kind = st.radio("Agregação", ["Média", "Mediana"], horizontal=True, key="clu_met_agg")
+                ano_sel = None
+                dfy = dfu.copy()
+    
+            # Estatística e variáveis
+            estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="mx_estat")
+            var_opts = sorted(dfy["variavel"].dropna().astype(str).unique().tolist())
+            vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(8, len(var_opts))], key="mx_vars")
+    
+            # Cluster 0..3
+            dfy["_cl_code"] = dfy["cluster"].apply(_to_int_code)
+            dfc = dfy[dfy["_cl_code"].isin([0,1,2,3])].copy()
+    
+            if vars_sel:
+                # TABELA 1 — pivot por cluster × variavel com valor escolhido
+                val_col = "media" if estat == "Média" else "mediana"
+                piv = dfc[dfc["variavel"].isin(vars_sel)].pivot_table(
+                    index="_cl_code", columns="variavel", values=val_col, aggfunc="first"
+                ).sort_index()
+                piv.index = [label_map.get(int(i), str(i)) for i in piv.index]
+    
+                # n_SQ aproximado por cluster (mediana dos 'n' das variáveis selecionadas)
+                n_by_clu = dfc[dfc["variavel"].isin(vars_sel)].groupby("_cl_code")["n"].median().rename("n_SQ")
+                tbl = piv.join(n_by_clu, how="left")
+    
+                st.markdown("**Tabela 1 — Valor por cluster (0–3)**")
+                st.dataframe(tbl, use_container_width=True)
+                download_df(tbl.reset_index().rename(columns={"index":"Cluster"}),
+                            f"univariadas_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
+                            f"{'_'+str(ano_sel) if ano_sel is not None else ''}_por_cluster")
+    
+                # TABELA 2 — Resumo por ano
+                # Preferimos `metrica` para resumo; se não existir, agregamos de `univariadas`
+                if met_files:
+                    met_obj = met_files[0]
+                    dfm = _as_df(met_obj)
+                    ac = _ano_col(dfm.columns)
+                    if ac and (ano_sel is not None):
+                        dfm = dfm[pd.to_numeric(dfm[ac], errors="coerce").astype("Int64") == ano_sel].copy()
+                    # tenta casar nomes: busca colunas que contenham o nome da variável
+                    # (útil quando `metrica` tem sufixos _medio/_mediana)
+                    if estat == "Média":
+                        cols_match = []
+                        for v in vars_sel:
+                            # prioriza *_medio / *_media
+                            cands = [c for c in dfm.columns if c.lower().endswith("_medio") or c.lower().endswith("_media")]
+                            cands += [c for c in dfm.columns if c.lower().endswith("_pct_medio")]
+                            pick = [c for c in cands if v.lower() in c.lower()]
+                            cols_match += pick or [c for c in dfm.columns if v.lower() in c.lower()]
+                        cols_match = [c for c in sorted(set(cols_match)) if pd.api.types.is_numeric_dtype(dfm[c])]
+                    else:
+                        cols_match = [c for c in dfm.columns if v.lower() in c.lower() and c.lower().endswith("_mediana") for v in vars_sel]
+                        cols_match = [c for c in sorted(set(cols_match)) if pd.api.types.is_numeric_dtype(dfm[c])]
+    
+                    if cols_match:
+                        desc = dfm[cols_match].describe().T
+                        st.markdown("**Tabela 2 — Resumo (describe) do ano selecionado**")
+                        st.dataframe(desc, use_container_width=True)
+                        download_df(desc.reset_index().rename(columns={"index":"variavel"}),
+                                    f"resumo_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
+                                    f"{'_'+str(ano_sel) if ano_sel is not None else ''}")
+                    else:
+                        st.caption("Não consegui casar nomes no `metrica` para gerar o resumo.")
+                else:
+                    # Resumo a partir de `univariadas`
+                    if estat == "Média":
+                        agg = (
+                            dfc[dfc["variavel"].isin(vars_sel)]
+                            .groupby("variavel")
+                            .apply(lambda d: np.average(d["media"], weights=d["n"]))
+                            .to_frame("media_global")
+                        )
+                    else:
+                        agg = (
+                            dfc[dfc["variavel"].isin(vars_sel)]
+                            .groupby("variavel")["mediana"]
+                            .median()
+                            .to_frame("mediana_global")
+                        )
+                    st.markdown("**Tabela 2 — Resumo agregado por variável (a partir de `univariadas`)**")
+                    st.dataframe(agg, use_container_width=True)
+                    download_df(agg.reset_index(), f"resumo_univariadas_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
+                                                  f"{'_'+str(ano_sel) if ano_sel is not None else ''}")
+            else:
+                st.info("Selecione ao menos uma variável.")
+    
+        else:
+            # ---------------------- FONTE: METRICA ----------------------
+            met_name = st.selectbox("Arquivo `metrica`", [f["name"] for f in met_files], index=0, key="mx_met_file")
+            met_obj = next(x for x in met_files if x["name"] == met_name)
+            dfm = _as_df(met_obj)
+            st.caption(f"Fonte (metrica): `{met_obj['path']}`")
+    
+            # Descobre colunas
+            clu_col = next((c for c in dfm.columns if _re.search(r"(?i)(estagio.*cluster|cluster|label)", c)), None)
+            ano_c  = _ano_col(dfm.columns)
+            if clu_col is None:
+                st.error("Arquivo `metrica` precisa ter a coluna de cluster (ex.: EstagioClusterizacao).")
+            else:
+                # Ano
+                if ano_c:
+                    anos = pd.to_numeric(dfm[ano_c], errors="coerce").dropna().astype(int).unique().tolist()
+                    anos = sorted(anos)
+                    ano_sel = st.select_slider("Ano", options=anos, value=anos[-1], key="mx_met_ano")
+                    dfy = dfm[pd.to_numeric(dfm[ano_c], errors="coerce").astype("Int64") == ano_sel].copy()
+                else:
+                    ano_sel = None
+                    dfy = dfm.copy()
+    
+                # Estatística define sufixos
+                estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="mx_met_estat")
+                if estat == "Média":
+                    var_opts = [c for c in dfy.columns if (
+                        c.lower().endswith("_medio") or c.lower().endswith("_media") or c.lower().endswith("_pct_medio")
+                    ) and pd.api.types.is_numeric_dtype(dfy[c])]
+                    var_opts += [c for c in ["indice_acessibilidade","indice_diversidade_uso_shannon"] if c in dfy.columns]
+                else:
+                    var_opts = [c for c in dfy.columns if c.lower().endswith("_mediana") and pd.api.types.is_numeric_dtype(dfy[c])]
+                # remove chaves
+                drop = {clu_col, ano_c}
+                var_opts = sorted([c for c in set(var_opts) if c not in drop])
+    
+                vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(8, len(var_opts))], key="mx_met_vars")
+    
+                # Cluster 0..3
+                dfy["_cl_code"] = dfy[clu_col].apply(_to_int_code)
+                dfc = dfy[dfy["_cl_code"].isin([0,1,2,3])].copy()
     
                 if vars_sel:
-                    gb = dfm.groupby(clu_col)[vars_sel]
-                    tbl = gb.mean(numeric_only=True) if agg_kind == "Média" else gb.median(numeric_only=True)
+                    gb = dfc.groupby("_cl_code")[vars_sel]
+                    tbl = gb.mean(numeric_only=True) if estat == "Média" else gb.median(numeric_only=True)
+                    n_series = dfc.groupby("_cl_code")[vars_sel[0]].size().rename("n_SQ")
+                    tbl = tbl.join(n_series, how="left").sort_index()
+                    tbl.index = [label_map.get(int(i), str(i)) for i in tbl.index]
     
-                    # Deixa a ordem de clusters mais amigável (0→3 quando aplicável) e rótulos legíveis
-                    def _labelize_idx(x):
-                        try:
-                            xi = int(str(x).strip())
-                            return label_map.get(xi, str(x))
-                        except Exception:
-                            return str(x)
-    
-                    # ordena tentando interpretar início como inteiro
-                    def _sort_key(x):
-                        s = str(x)
-                        m = re.match(r"^\s*(\d+)", s)
-                        return (int(m.group(1)) if m else 9999, s)
-    
-                    tbl.index = [_labelize_idx(x) for x in tbl.index]
-                    tbl = tbl.sort_index(key=lambda idx: pd.Index([_sort_key(x) for x in idx]))
-    
-                    st.markdown(f"**Tabela — {agg_kind} por cluster**")
+                    st.markdown("**Tabela 1 — Valor por cluster (0–3)**")
                     st.dataframe(tbl, use_container_width=True)
+                    download_df(tbl.reset_index().rename(columns={"index":"Cluster"}),
+                                f"metrica_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
+                                f"{'_'+str(ano_sel) if ano_sel is not None else ''}_por_cluster")
     
-                    # Download CSV
-                    out_name = f"metrics_{ver_met}_{'media' if agg_kind=='Média' else 'mediana'}"
-                    if ano_col is not None and 'ano_sel' in locals():
-                        out_name += f"_{ano_sel}"
-                    download_df(tbl.reset_index().rename(columns={tbl.index.name or 'index':'Cluster'}), out_name)
+                    # Resumo (describe) do ano
+                    desc = dfy[vars_sel].describe().T
+                    st.markdown("**Tabela 2 — Resumo (describe) do ano selecionado**")
+                    st.dataframe(desc, use_container_width=True)
+                    download_df(desc.reset_index().rename(columns={"index":"variavel"}),
+                                f"resumo_metrica_{ver_sel}_{'media' if estat=='Média' else 'mediana'}"
+                                f"{'_'+str(ano_sel) if ano_sel is not None else ''}")
                 else:
-                    st.info("Selecione ao menos uma variável numérica para agregar.")
-    else:
-        st.info(
-            "Não encontrei arquivos de métricas. "
-            "Para **originais**, espero `metricas.csv/parquet` (ou algo contendo 'metrica/metrics'). "
-            "Para **winsorizados**, espero `analise_clusters__metrics_fact.csv/parquet`."
-        )
+                    st.info("Selecione ao menos uma variável.")
 
     # ------------------------------------------
     # 2.x) Spearman (pares) — somente TABELA
@@ -1787,6 +1871,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
