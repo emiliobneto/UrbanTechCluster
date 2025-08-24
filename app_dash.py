@@ -1437,16 +1437,23 @@ with tab2:
     # ---------- merge leve ----------
     gdfc = gdfq.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
 
-    # labels elegantes
-    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0,1,2,3]))
-    gdfc["cluster_lbl"] = np.where(
-        gdfc["_cl_code_clean"].notna(),
-        gdfc["_cl_code_clean"].astype(int).map(label_map),
-        gdfc[cluster_col].astype(str),
-    )
+    # mantém apenas 0..3; deixa NA quando for outro valor
+    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0, 1, 2, 3]))
+    
+    # converte para Int64 (aceita NA) e mapeia rótulos
+    _codes = gdfc["_cl_code_clean"].astype("Int64")           # <- NA-safe
+    lbl_mapped = _codes.map(label_map)                        # ints 0..3 → rótulos
+    gdfc["cluster_lbl"] = lbl_mapped.fillna(gdfc[cluster_col].astype("string"))
+    
+    # ordenação da legenda usando os códigos presentes (0→3) + demais categorias
+    codes_present = [int(x) for x in _codes.dropna().unique().tolist()]
+    labels_from_codes = [label_map[c] for c in sorted(codes_present)]
+    other_labels = sorted(
+    [l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes],
+    key=str
+)
+cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
 
-    # legenda ordenada 0→3 + outros
-    codes_present = [int(x) for x in sorted(gdfc["_cl_code_clean"].dropna().unique())]
     labels_from_codes = [label_map[c] for c in codes_present]
     other_labels = sorted([l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
     cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
@@ -1697,6 +1704,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
