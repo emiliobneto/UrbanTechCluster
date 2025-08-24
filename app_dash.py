@@ -256,10 +256,21 @@ def pick_existing_dir(owner_repo: str, branch: str, candidates: list[str]) -> st
 # CORES / CLASSIF / MAPAS / LEGENDAS
 # ==========================
 
-def hex_to_rgba(hex_color: str):
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
-    return [r, g, b, 180]
+def hex_to_rgba(hex_color, alpha: int = 180):
+    """Converte #RRGGBB ou #RGB em [r,g,b,alpha]. Tolera NaN/None/strings inválidas."""
+    try:
+        if not isinstance(hex_color, str):
+            return [153, 153, 153, alpha]  # cinza padrão
+        h = hex_color.strip().lstrip("#")
+        if len(h) == 3:  # #abc -> #aabbcc
+            h = "".join(ch * 2 for ch in h)
+        if len(h) != 6:
+            return [153, 153, 153, alpha]
+        r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
+        return [r, g, b, alpha]
+    except Exception:
+        return [153, 153, 153, alpha]
+
 
 
 SEQUENTIAL = {
@@ -1462,7 +1473,9 @@ with tab2:
 
     # ---------- cor como coluna (sem loop em features) ----------
     gdfc = gdfc[[gdfc.geometry.name, "_SQ_norm", "cluster_lbl"]].copy()
-    gdfc["fill_color"] = gdfc["cluster_lbl"].map(cmap).apply(hex_to_rgba)
+    gdfc["fill_color"] = gdfc["cluster_lbl"].apply(
+    lambda lab: hex_to_rgba(cmap.get(lab, "#999999"))
+    )
 
     # ---------- simplificação opcional ----------
     if simplify_tol and simplify_tol > 0:
@@ -1704,6 +1717,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
