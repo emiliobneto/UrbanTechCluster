@@ -11,16 +11,33 @@ import requests
 import streamlit as st
 
 
-# ——— Layout amplo e ajustes de espaçamento
-st.set_page_config(page_title="MODELO RNA — Clusters SP", page_icon="🧠", layout="wide")
-st.markdown("""
-<style>
-/* aumenta a largura útil e reduz paddings */
-.block-container {max-width: 95vw; padding-top: .5rem; padding-bottom: .75rem;}
-/* sidebar um pouco mais larga para controles */
-[data-testid="stSidebar"] {min-width: 340px;}
-</style>
-""", unsafe_allow_html=True)
+# ——— CONFIGURAÇÃO GERAL (deve ser a 1ª chamada Streamlit) ———
+st.set_page_config(
+    page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
+    page_icon="🧠",
+    layout="wide",
+)
+
+TITLE = (
+    "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA "
+    "E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
+)
+st.title(TITLE)
+
+# ——— Estilo global (largura e legibilidade das abas) ———
+st.markdown(
+    """
+    <style>
+      .block-container { max-width: 1600px; padding-top: 0.75rem; }
+      .stTabs [data-baseweb="tab"] p {
+        margin: 0;
+        font-size: 15px !important;
+        color: rgba(17,17,17,1) !important; /* força cor escura */
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ==========================
@@ -1658,79 +1675,195 @@ with tab2:
                 df_join = df_vals.merge(df_est_dedup[["_SQ_norm", "_cl_code"]], on="_SQ_norm", how="inner")
                 df_join = df_join[df_join["_cl_code"].isin([0, 1, 2, 3])].copy()
 
-                # 4) Calcula métricas variável a variável
+                # 4) Calcula métricas por variável, tratando o cluster como FATOR (0..3)
                 rows = []
+                CLUSTERS = [0, 1, 2, 3]
+                
                 for v in vars_sel_adv:
                     d = df_join[["_cl_code", v]].dropna()
                     if d.empty:
-                        rows.append({
-                            "variavel": v, "n": 0,
-                            "spearman_rho": np.nan, "spearman_p": np.nan,
-                            "gini_corr": np.nan, "r2": np.nan,
-                            "shapiro_p_c0": np.nan, "shapiro_p_c3": np.nan,
-                            "ttest_t_0v3": np.nan, "ttest_p_0v3": np.nan
-                        })
+                        # linha “vazia” por cluster para manter a estrutura
+                        for k in CLUSTERS:
+                            rows.append({
+                                "variavel": v, "cluster": k,
+                                "n_total": 0, "n_cluster": 0,
+                                "spearman_rho": np.nan, "spearman_p": np.nan,
+                                "gini_corr": np.nan, "r2_dummy": np.nan,
+                                "shapiro_p": np.nan, "ttest_t_k_vs_rest": np.nan, "ttest_p_k_vs_rest": np.nan
+                            })
                         continue
-
-                    x = d[v].to_numpy()
-                    c = d["_cl_code"].to_numpy()
-
-                    # Spearman
-                    if spearmanr is not None and len(d) >= 3:
-                        try:
-                            rho, pval = spearmanr(x, c, nan_policy="omit")
-                        except Exception:
-                            rho = d[v].corr(d["_cl_code"], method="spearman")
-                            pval = np.nan
-                    else:
-                        rho = d[v].corr(d["_cl_code"], method="spearman")
-                        pval = np.nan
-
-                    # Gini (simétrica)
-                    gini = _gini_corr(x, c)
-
-                    # R² (y ~ 1 + cluster_code)
-                    r2 = _r2_simple(x, c)
-
-                    # Shapiro por cluster 0 e 3 (se SciPy disponível)
-                    if shapiro is not None:
-                        try:
-                            x0 = d.loc[d["_cl_code"] == 0, v].dropna().to_numpy()
-                            x3 = d.loc[d["_cl_code"] == 3, v].dropna().to_numpy()
-                            sp0 = shapiro(x0).pvalue if len(x0) >= 3 else np.nan
-                            sp3 = shapiro(x3).pvalue if len(x3) >= 3 else np.nan
-                        except Exception:
-                            sp0 = sp3 = np.nan
-                    else:
-                        sp0 = sp3 = np.nan  # fallback sem SciPy
-
-                    # t-test (Welch) cluster 0 vs 3
-                    if ttest_ind is not None:
-                        try:
-                            x0 = d.loc[d["_cl_code"] == 0, v].dropna().to_numpy()
-                            x3 = d.loc[d["_cl_code"] == 3, v].dropna().to_numpy()
-                            if len(x0) >= 2 and len(x3) >= 2:
-                                t_stat, p_t = ttest_ind(x0, x3, equal_var=False)
+                
+                    x_all = d[v].to_numpy()
+                    c_all = d["_cl_code"].to_numpy()
+                
+                    for k in CLUSTERS:
+                        # dummy do fator: 1{cluster == k}
+                        y_bin = (c_all == k).astype(int)
+                        n_tot = int(len(x_all))
+                        n_k = int(y_bin.sum())
+                
+                        # Spearman(x, 1{cluster==k})
+                        if spearmanr is not None and n_tot >= 3:
+                            try:
+                                rho, pval = spearmanr(x_all, y_bin, nan_policy="omit")
+                            except Exception:
+                                rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
+                        else:
+                            rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
+                
+                        # Correlação de Gini (simétrica) entre x e o dummy
+                        gini = _gini_corr(x_all, y_bin)
+                
+                        # R² da regressão x ~ 1 + 1{cluster==k}
+                        r2 = _r2_simple(x_all, y_bin)
+                
+                        # Shapiro dentro do cluster k
+                        if shapiro is not None and n_k >= 3:
+                            try:
+                                sh_p = shapiro(x_all[y_bin == 1]).pvalue
+                            except Exception:
+                                sh_p = np.nan
+                        else:
+                            sh_p = np.nan
+                
+                        # t-test Welch: cluster k vs demais
+                        if ttest_ind is not None:
+                            x_k = x_all[y_bin == 1]
+                            x_rest = x_all[y_bin == 0]
+                            if len(x_k) >= 2 and len(x_rest) >= 2:
+                                t_stat, p_t = ttest_ind(x_k, x_rest, equal_var=False)
                             else:
                                 t_stat = p_t = np.nan
-                        except Exception:
+                        else:
                             t_stat = p_t = np.nan
-                    else:
-                        t_stat = p_t = np.nan
+                
+                        rows.append({
+                            "variavel": v,
+                            "cluster": k,
+                            "n_total": n_tot,
+                            "n_cluster": n_k,
+                            "spearman_rho": rho, "spearman_p": pval,
+                            "gini_corr": gini,
+                            "r2_dummy": r2,
+                            "shapiro_p": sh_p,
+                            "ttest_t_k_vs_rest": t_stat, "ttest_p_k_vs_rest": p_t
+                        })
+                
+                df_metrics_long = pd.DataFrame(rows)
+                
+                st.markdown("**Tabela — Métricas (one-vs-rest) por variável e cluster**")
+                st.dataframe(df_metrics_long, use_container_width=True)
+                download_df(df_metrics_long, f"metricas_avancadas_factor_{ver_val}"
+                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_long")
+                
+                # Versão wide (colunas por cluster para leitura rápida)
+                wide = df_metrics_long.pivot_table(
+                    index="variavel", columns="cluster",
+                    values=["spearman_rho","gini_corr","r2_dummy","shapiro_p","ttest_p_k_vs_rest"],
+                    aggfunc="first"
+                ).sort_index(axis=1)
+                wide.columns = [f"{m}_c{c}" for (m, c) in wide.columns]
+                wide = wide.reset_index()
+                
+                st.markdown("**Tabela (wide) — métricas por cluster em colunas**")
+                st.dataframe(wide, use_container_width=True)
+                download_df(wide, f"metricas_avancadas_factor_{ver_val}"
+                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_wide")
+                # 4) Calcula métricas por variável, tratando o cluster como FATOR (0..3)
+                rows = []
+                CLUSTERS = [0, 1, 2, 3]
+                
+                for v in vars_sel_adv:
+                    d = df_join[["_cl_code", v]].dropna()
+                    if d.empty:
+                        # linha “vazia” por cluster para manter a estrutura
+                        for k in CLUSTERS:
+                            rows.append({
+                                "variavel": v, "cluster": k,
+                                "n_total": 0, "n_cluster": 0,
+                                "spearman_rho": np.nan, "spearman_p": np.nan,
+                                "gini_corr": np.nan, "r2_dummy": np.nan,
+                                "shapiro_p": np.nan, "ttest_t_k_vs_rest": np.nan, "ttest_p_k_vs_rest": np.nan
+                            })
+                        continue
+                
+                    x_all = d[v].to_numpy()
+                    c_all = d["_cl_code"].to_numpy()
+                
+                    for k in CLUSTERS:
+                        # dummy do fator: 1{cluster == k}
+                        y_bin = (c_all == k).astype(int)
+                        n_tot = int(len(x_all))
+                        n_k = int(y_bin.sum())
+                
+                        # Spearman(x, 1{cluster==k})
+                        if spearmanr is not None and n_tot >= 3:
+                            try:
+                                rho, pval = spearmanr(x_all, y_bin, nan_policy="omit")
+                            except Exception:
+                                rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
+                        else:
+                            rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
+                
+                        # Correlação de Gini (simétrica) entre x e o dummy
+                        gini = _gini_corr(x_all, y_bin)
+                
+                        # R² da regressão x ~ 1 + 1{cluster==k}
+                        r2 = _r2_simple(x_all, y_bin)
+                
+                        # Shapiro dentro do cluster k
+                        if shapiro is not None and n_k >= 3:
+                            try:
+                                sh_p = shapiro(x_all[y_bin == 1]).pvalue
+                            except Exception:
+                                sh_p = np.nan
+                        else:
+                            sh_p = np.nan
+                
+                        # t-test Welch: cluster k vs demais
+                        if ttest_ind is not None:
+                            x_k = x_all[y_bin == 1]
+                            x_rest = x_all[y_bin == 0]
+                            if len(x_k) >= 2 and len(x_rest) >= 2:
+                                t_stat, p_t = ttest_ind(x_k, x_rest, equal_var=False)
+                            else:
+                                t_stat = p_t = np.nan
+                        else:
+                            t_stat = p_t = np.nan
+                
+                        rows.append({
+                            "variavel": v,
+                            "cluster": k,
+                            "n_total": n_tot,
+                            "n_cluster": n_k,
+                            "spearman_rho": rho, "spearman_p": pval,
+                            "gini_corr": gini,
+                            "r2_dummy": r2,
+                            "shapiro_p": sh_p,
+                            "ttest_t_k_vs_rest": t_stat, "ttest_p_k_vs_rest": p_t
+                        })
+                
+                df_metrics_long = pd.DataFrame(rows)
+                
+                st.markdown("**Tabela — Métricas (one-vs-rest) por variável e cluster**")
+                st.dataframe(df_metrics_long, use_container_width=True)
+                download_df(df_metrics_long, f"metricas_avancadas_factor_{ver_val}"
+                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_long")
+                
+                # Versão wide (colunas por cluster para leitura rápida)
+                wide = df_metrics_long.pivot_table(
+                    index="variavel", columns="cluster",
+                    values=["spearman_rho","gini_corr","r2_dummy","shapiro_p","ttest_p_k_vs_rest"],
+                    aggfunc="first"
+                ).sort_index(axis=1)
+                wide.columns = [f"{m}_c{c}" for (m, c) in wide.columns]
+                wide = wide.reset_index()
+                
+                st.markdown("**Tabela (wide) — métricas por cluster em colunas**")
+                st.dataframe(wide, use_container_width=True)
+                download_df(wide, f"metricas_avancadas_factor_{ver_val}"
+                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_wide")
 
-                    rows.append({
-                        "variavel": v,
-                        "n": int(len(d)),
-                        "spearman_rho": rho, "spearman_p": pval,
-                        "gini_corr": gini,
-                        "r2": r2,
-                        "shapiro_p_c0": sp0, "shapiro_p_c3": sp3,
-                        "ttest_t_0v3": t_stat, "ttest_p_0v3": p_t,
-                    })
-
-                df_metrics = pd.DataFrame(rows)
-                st.markdown("**Tabela — Métricas (0–3) por variável**")
-                st.dataframe(df_metrics, use_container_width=True)
                 download_df(df_metrics, f"metricas_avancadas_{ver_val}"
                                         f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
             else:
@@ -1825,6 +1958,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
