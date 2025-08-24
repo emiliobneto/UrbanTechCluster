@@ -1310,23 +1310,23 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (leve e rápida)
+# ABA 2 — Clusterização (mapas, métricas por cluster e testes)
 # -----------------------------------------------------------------------------
 with tab2:
-    st.subheader("Mapa de Clusters + Métricas")
+    st.subheader("🧬 Clusterização — Mapas, Métricas e Testes")
 
     import re as _re
 
-    # ---------- helpers (rápidos) ----------
+    # ---------- helpers ----------
     def _norm_sq_6(x, digits: int = 6) -> str | None:
         if x is None or (isinstance(x, float) and np.isnan(x)):
             return None
         s = str(x).strip()
-        s = _re.sub(r"\D", "", s)  # mantém só dígitos
+        s = _re.sub(r"\D", "", s)
         if s == "":
             return None
         if len(s) > digits:
-            s = s[-digits:]         # pega os ÚLTIMOS 6
+            s = s[-digits:]
         return s.zfill(digits)
 
     def _to_int_code(x):
@@ -1351,8 +1351,10 @@ with tab2:
     with colTopL:
         up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv", "parquet"], key="clu_upl")
     with colTopR:
-        simplify_tol = st.slider("Simplificação da geometria (°)", 0.0, 0.0008, 0.0002, 0.0001,
-                                 help="Valores maiores = menos vértices = mais rápido.")
+        simplify_tol = st.slider(
+            "Simplificação da geometria (°)", 0.0, 0.0008, 0.0002, 0.0001,
+            help="Valores maiores = menos vértices = mais rápido.", key="clu_simplify"
+        )
 
     if up is not None:
         df_est = pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up)
@@ -1380,10 +1382,9 @@ with tab2:
     if not join_est:
         st.error("O arquivo de clusters não possui coluna 'SQ'."); st.stop()
 
-    # Filtro de ano ANTES do merge
-    ano_col = next((c for c in df_est.columns if str(c).lower() == "ano"), None)
-    if ano_col:
-        anos_vals = pd.to_numeric(df_est[ano_col], errors="coerce")
+    ano_col_est = next((c for c in df_est.columns if str(c).lower() == "ano"), None)
+    if ano_col_est:
+        anos_vals = pd.to_numeric(df_est[ano_col_est], errors="coerce")
         anos_ok = sorted(anos_vals.dropna().astype(int).unique().tolist())
         if anos_ok:
             year_sel = st.select_slider("Ano (clusters)", options=anos_ok, value=anos_ok[-1], key="clu_ano")
@@ -1411,7 +1412,7 @@ with tab2:
     if not join_quad:
         st.error("A camada de quadras não possui coluna 'SQ'."); st.stop()
 
-    # Mantém só geometry + SQ (NÃO filtre aqui por recorte)
+    # Mantém só geometry + SQ (base geral, sem recorte)
     gdfq_full = gdf_quadras[[join_quad, gdf_quadras.geometry.name]].copy()
     gdfq_full["_SQ_norm"] = gdfq_full[join_quad].apply(_norm_sq_6)
 
@@ -1426,14 +1427,13 @@ with tab2:
     gdfc_base = gdfq_full.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
 
     # mapping de labels e paleta
-    def _attach_colors(gdf_in: "GeoDataFrame") -> "GeoDataFrame":
+    def _attach_colors(gdf_in: "GeoDataFrame"):
         g = gdf_in.copy()
         g["_cl_code_clean"] = g["_cl_code"].where(g["_cl_code"].isin([0, 1, 2, 3]))
         _codes = g["_cl_code_clean"].astype("Int64")
         lbl_mapped = _codes.map(label_map)
         g["cluster_lbl"] = lbl_mapped.fillna(g[cluster_col].astype("string"))
 
-        # ordem da legenda (0→3 primeiro, depois outras categorias se houver)
         codes_present = [int(x) for x in _codes.dropna().unique().tolist()]
         labels_from_codes = [label_map[c] for c in sorted(codes_present)]
         other_labels = sorted([l for l in g["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
@@ -1447,8 +1447,15 @@ with tab2:
     # aplica paleta na base (mapa geral)
     gdfc_main, cats_sorted, cmap = _attach_colors(gdfc_base)
 
-    # ---------- (opcional) Recorte (NÃO altera o gdfc_main) ----------
-    st.markdown("#### Mapa — Recortes (opcional)")
+    # simplificação opcional
+    if simplify_tol and simplify_tol > 0:
+        try:
+            gdfc_main[gdfc_main.geometry.name] = gdfc_main[gdfc_main.geometry.name].simplify(simplify_tol, preserve_topology=True)
+        except Exception:
+            pass
+
+    # ---------- recorte (sem mexer no gdfc_main) ----------
+    st.markdown("#### Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
     rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
     gdf_rec = None
@@ -1458,8 +1465,6 @@ with tab2:
         if rec_sel != "(sem recorte)":
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
-
-            # Determina SQs do recorte sem mexer no dataset geral
             try:
                 import geopandas as gpd
                 gq = ensure_wgs84(gdfq_full[[gdfq_full.geometry.name, "_SQ_norm"]])
@@ -1472,49 +1477,49 @@ with tab2:
             except Exception as e:
                 st.error(f"Falha ao cruzar recorte com SQs: {e}")
                 sq_keep = []
-
             gdfc_rec = gdfc_main[gdfc_main["_SQ_norm"].isin(sq_keep)].copy()
+            if simplify_tol and simplify_tol > 0:
+                try:
+                    gdfc_rec[gdfc_rec.geometry.name] = gdfc_rec[gdfc_rec.geometry.name].simplify(simplify_tol, preserve_topology=True)
+                except Exception:
+                    pass
 
-    # ---------- GeoJSON & MAPAS ----------
-    colM, colL = st.columns([4.5, 1], gap="large")
-    with colM:
-        st.markdown("#### Mapa — Clusters por SQ (geral)")
-        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
-        geojson_main = make_geojson(gdfc_main[[gdfc_main.geometry.name, "cluster_lbl", "fill_color"]])
-        lyr = render_geojson_layer(geojson_main, name="clusters")
-        if base_map.startswith("Satélite"):
-            deck([lyr], satellite=True)
-        else:
-            osm_basemap_deck([lyr])
-    with colL:
-        st.markdown("**Legenda — Estágio**")
-        for lab in cats_sorted:
-            _legend_row(cmap[lab], lab)
+    # ---------- MAPAS ----------
+    # 1) Geral (sempre)
+    st.markdown("### 🗺️ Mapa — Clusters por SQ (geral)")
+    base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+    geojson_main = make_geojson(gdfc_main[[gdfc_main.geometry.name, "cluster_lbl", "fill_color"]])
+    lyr_main = render_geojson_layer(geojson_main, name="clusters")
+    if base_map.startswith("Satélite"):
+        deck([lyr_main], satellite=True)
+    else:
+        osm_basemap_deck([lyr_main])
 
-    # ---------- mapa do recorte (se houver) com MESMAS cores ----------
+    # legenda (geral)
+    st.markdown("**Legenda — Estágio (geral)**")
+    for lab in cats_sorted:
+        _legend_row(cmap[lab], lab)
+
+    # 2) Recorte (se houver)
     if gdf_rec is not None and gdfc_rec is not None and not gdfc_rec.empty:
-        st.markdown("#### Mapa — Recorte selecionado")
+        st.markdown("### 🗺️ Mapa — Recorte selecionado")
         geojson_rec = make_geojson(gdfc_rec[[gdfc_rec.geometry.name, "cluster_lbl", "fill_color"]])
         lyr_rec = render_geojson_layer(geojson_rec, name="clusters_recorte")
         border = render_line_layer(make_geojson(gdf_rec), name="recorte")
-        colRm, colRl = st.columns([4.5, 1], gap="large")
-        with colRm:
-            if base_map.startswith("Satélite"):
-                deck([lyr_rec, border], satellite=True)
-            else:
-                osm_basemap_deck([lyr_rec, border])
-        with colRl:
-            st.markdown("**Legenda — Recorte**")
-            for lab in cats_sorted:
-                _legend_row(cmap[lab], lab)
+        if base_map.startswith("Satélite"):
+            deck([lyr_rec, border], satellite=True)
+        else:
+            osm_basemap_deck([lyr_rec, border])
+        st.markdown("**Legenda — Recorte (mesmas cores)**")
+        for lab in cats_sorted:
+            _legend_row(cmap[lab], lab)
 
-    
     st.divider()
 
     # ------------------------------------------
-    # 2.x) Métricas por cluster — a partir de univariadas.parquet
+    # 2.1) Métricas por cluster — a partir de univariadas.parquet
     # ------------------------------------------
-    st.subheader("Métricas por cluster — univariadas")
+    st.subheader("📊 Métricas por cluster — univariadas")
 
     def _load_univariadas(version: str) -> pd.DataFrame:
         base = "Data/analises/original" if version == "originais" else "Data/analises/winsorizados"
@@ -1556,17 +1561,16 @@ with tab2:
                 dfy["_cl_code"] = dfy[col_clu].apply(_to_int_code)
                 dfc = dfy[dfy["_cl_code"].isin([0,1,2,3]) & dfy[col_var].isin(vars_sel)].copy()
 
-                # Tabela 1 — Cluster (linhas) × Variável (colunas)
+                # Tabela — Cluster (linhas) × Variável (colunas)
                 piv = dfc.pivot_table(index="_cl_code", columns=col_var, values=stat_col, aggfunc="first").sort_index()
                 piv.index = [label_map.get(int(i), str(i)) for i in piv.index]
-                st.markdown("**Tabela 1 — Valor por cluster (0–3)**")
+                st.markdown("**Tabela — Valor por cluster (0–3)**")
                 st.dataframe(piv, use_container_width=True)
                 download_df(piv.reset_index().rename(columns={"index":"Cluster"}),
                             f"univariadas_{ver_uni}_{stat_col}"
                             f"{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster")
 
-                # Tabela 2 — Resumo (describe) das variáveis selecionadas, no ano e estatística escolhidos
-                # (distribuição entre os 4 clusters)
+                # Resumo (describe) das variáveis selecionadas (distribuição dos 4 clusters)
                 desc = (
                     dfc[[col_var, stat_col]]
                     .groupby(col_var)[stat_col]
@@ -1574,56 +1578,48 @@ with tab2:
                     .rename_axis("variavel")
                     .reset_index()
                 )
-                st.markdown("**Tabela 2 — Resumo das variáveis selecionadas (ano/estatística escolhidos)**")
+                st.markdown("**Resumo — distribuição entre clusters (ano/estatística escolhidos)**")
                 st.dataframe(desc, use_container_width=True)
                 download_df(desc, f"univariadas_{ver_uni}_{stat_col}"
                                    f"{'_'+str(ano_uni) if ano_uni is not None else ''}_resumo")
             else:
                 st.info("Selecione ao menos uma variável.")
-# ------------------------------------------
-# 2.x) Métricas avançadas (0–3) — Spearman, Gini, R², Shapiro, t-test
-# ------------------------------------------
-    st.subheader("Métricas avançadas (0–3) — por variável")
 
-    # Pequenas helpers locais
+    st.divider()
+
+    # ------------------------------------------
+    # 2.2) Métricas avançadas (cluster como fator 0–3)
+    #     - descritiva por cluster
+    #     - omnibus: ANOVA (eta²) e Kruskal
+    #     - correlações: Spearman, Gini, R² (y ~ cluster_code)
+    #     - pares: Welch t-test, Mann-Whitney, Cohen’s d, Cliff’s delta, FDR-BH
+    # ------------------------------------------
+    st.subheader("🧪 Métricas avançadas — cluster (0–3)")
+
+    # imports opcionais SciPy
     try:
-        from scipy.stats import spearmanr, shapiro, ttest_ind  # opcional
+        from scipy.stats import spearmanr as _spearman_fn, shapiro as _shapiro_fn, ttest_ind as _ttest_fn, mannwhitneyu as _mw_fn, f_oneway as _anova_fn, kruskal as _kruskal_fn
     except Exception:
-        spearmanr = shapiro = ttest_ind = None
+        _spearman_fn = _shapiro_fn = _ttest_fn = _mw_fn = _anova_fn = _kruskal_fn = None
 
+    # funções auxiliares
     def _gini_corr(x: np.ndarray, y: np.ndarray) -> float:
-        """
-        Correlação de Gini (versão simétrica).
-        Def: corr_G(x|y) = cov(x, F_y(y)) / cov(x, F_x(x)); simétrica = sign(pearson)*sqrt(corr_G(x|y)*corr_G(y|x))
-        """
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
+        x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
         n = len(x)
-        if n < 3:
-            return np.nan
+        if n < 3: return np.nan
         rx = pd.Series(x).rank(method="average") / n
         ry = pd.Series(y).rank(method="average") / n
-
-        def _cov(a, b):
-            return float(np.mean((a - np.mean(a)) * (b - np.mean(b))))
-
-        c_xFx = _cov(x, rx);  c_yFy = _cov(y, ry)
-        if abs(c_xFx) < 1e-15 or abs(c_yFy) < 1e-15:
-            return np.nan
+        def _cov(a,b): return float(np.mean((a - np.mean(a)) * (b - np.mean(b))))
+        c_xFx = _cov(x, rx); c_yFy = _cov(y, ry)
+        if abs(c_xFx) < 1e-15 or abs(c_yFy) < 1e-15: return np.nan
         g_xy = _cov(x, ry) / c_xFx
         g_yx = _cov(y, rx) / c_yFy
-        # simétrica com o sinal do Pearson
-        r = np.corrcoef(x, y)[0, 1]
+        r = np.corrcoef(x, y)[0,1]
         return float(np.sign(r) * np.sqrt(abs(g_xy * g_yx)))
 
     def _r2_simple(y: np.ndarray, x: np.ndarray) -> float:
-        """
-        R² da regressão y ~ 1 + x (OLS). Aqui: y = variável, x = código do cluster (0..3).
-        """
-        y = np.asarray(y, dtype=float)
-        x = np.asarray(x, dtype=float)
-        if len(y) < 3:
-            return np.nan
+        y = np.asarray(y, dtype=float); x = np.asarray(x, dtype=float)
+        if len(y) < 3: return np.nan
         X = np.column_stack([np.ones(len(x)), x])
         beta, *_ = np.linalg.lstsq(X, y, rcond=None)
         yhat = X @ beta
@@ -1631,7 +1627,48 @@ with tab2:
         ss_tot = float(np.sum((y - y.mean()) ** 2))
         return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
 
-    # 1) Escolha da versão e do arquivo de VALORES (por SQ)
+    def _eta_squared(groups: list[np.ndarray]) -> float:
+        # ANOVA eta² = SSB / SST
+        sizes = [len(g) for g in groups if len(g) > 0]
+        if sum(sizes) < 3: return np.nan
+        all_vals = np.concatenate([g for g in groups if len(g) > 0])
+        grand = np.mean(all_vals)
+        ssb = sum(len(g) * (np.mean(g) - grand) ** 2 for g in groups if len(g) > 0)
+        sst = np.sum((all_vals - grand) ** 2)
+        return float(ssb / sst) if sst > 0 else np.nan
+
+    def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
+        n1, n2 = len(a), len(b)
+        if n1 < 2 or n2 < 2: return np.nan
+        v1 = np.var(a, ddof=1); v2 = np.var(b, ddof=1)
+        if not np.isfinite(v1) or not np.isfinite(v2): return np.nan
+        sp = np.sqrt(((n1-1)*v1 + (n2-1)*v2) / (n1+n2-2)) if (n1+n2-2) > 0 else np.nan
+        return (np.mean(a) - np.mean(b)) / sp if (sp is not None and np.isfinite(sp) and sp > 0) else np.nan
+
+    def _cliffs_delta(a: np.ndarray, b: np.ndarray) -> float:
+        gt = lt = 0
+        for aa in a:
+            lt += np.sum(aa < b); gt += np.sum(aa > b)
+        n = len(a) * len(b)
+        return (gt - lt) / n if n > 0 else np.nan
+
+    def _bh_fdr(pvals_series: pd.Series) -> pd.Series:
+        p = pvals_series.values
+        idx = np.where(np.isfinite(p))[0]
+        if len(idx) == 0:
+            return pd.Series(np.nan, index=pvals_series.index)
+        p_ok = p[idx]
+        order = np.argsort(p_ok)
+        ranks = np.arange(1, len(p_ok) + 1, dtype=float)
+        q_ok = (p_ok[order] * len(p_ok)) / ranks
+        # torna monótona não-crescente de trás pra frente
+        for i in range(len(q_ok) - 2, -1, -1):
+            q_ok[order[i]] = min(q_ok[order[i]], q_ok[order[i + 1]])
+        q = np.full_like(p, np.nan, dtype=float)
+        q[idx] = np.clip(q_ok, 0, 1)
+        return pd.Series(q, index=pvals_series.index)
+
+    # 1) Escolha da versão e do arquivo de valores (por SQ)
     ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="adv_ver")
     base_vals = pick_existing_dir(
         repo, branch,
@@ -1643,232 +1680,190 @@ with tab2:
     if not vals_all:
         st.info(f"Nenhum arquivo de valores encontrado em `{base_vals}`.")
     else:
-        # (opcional) ignorar arquivos de predição
         incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="adv_incl_pred")
         vals_files = [f for f in vals_all if incl_pred or not f["name"].lower().startswith("pred_")]
         sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="adv_vals_file")
         vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
         df_vals = load_parquet(repo, vals_obj["path"], branch) if vals_obj["name"].endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
 
-        # 2) Descobre colunas e filtra pelo mesmo ano dos clusters (se existir)
-        sq_col = next((c for c in df_vals.columns if str(c).upper() == "SQ"), None)
+        # 2) Filtro de ano para valores (usa o ano dos clusters, se ambos tiverem)
+        sq_col_vals = next((c for c in df_vals.columns if str(c).upper() == "SQ"), None)
         ano_col_vals = next((c for c in df_vals.columns if str(c).lower() in ("ano", "year")), None)
-        if sq_col is None:
+        if sq_col_vals is None:
             st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
         else:
-            if ano_col_vals and "year_sel" in locals():
-                # usa o ano selecionado para os clusters, se existir
+            if ano_col_vals and 'year_sel' in locals():
                 df_vals = df_vals[pd.to_numeric(df_vals[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
 
-            # variáveis numéricas disponíveis
+            # variáveis numéricas
             id_like = {c for c in df_vals.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
             time_like = {c for c in df_vals.columns if str(c).lower() in {"ano", "year"}}
             num_vars = [c for c in df_vals.columns if pd.api.types.is_numeric_dtype(df_vals[c])]
             var_opts = sorted([c for c in num_vars if c not in id_like | time_like])
 
-            # seleção de variáveis
-            vars_sel_adv = st.multiselect("Variáveis para calcular métricas (0–3)", var_opts, default=var_opts[: min(10, len(var_opts))], key="adv_vars")
+            vars_sel_adv = st.multiselect("Variáveis (0–3)", var_opts, default=var_opts[: min(10, len(var_opts))], key="adv_vars")
             if vars_sel_adv:
-                # 3) Junta com os clusters já carregados (df_est_dedup) e restringe 0..3
-                df_vals = df_vals[[sq_col] + vars_sel_adv].copy()
-                df_vals["_SQ_norm"] = df_vals[sq_col].apply(_norm_sq_6)
+                # 3) Junta com os clusters e restringe 0..3
+                df_vals = df_vals[[sq_col_vals] + vars_sel_adv].copy()
+                df_vals["_SQ_norm"] = df_vals[sq_col_vals].apply(_norm_sq_6)
                 df_join = df_vals.merge(df_est_dedup[["_SQ_norm", "_cl_code"]], on="_SQ_norm", how="inner")
                 df_join = df_join[df_join["_cl_code"].isin([0, 1, 2, 3])].copy()
 
-                # 4) Calcula métricas por variável, tratando o cluster como FATOR (0..3)
-                rows = []
-                CLUSTERS = [0, 1, 2, 3]
-                
+                # ---------- DESCRITIVA POR CLUSTER ----------
+                desc_rows = []
                 for v in vars_sel_adv:
-                    d = df_join[["_cl_code", v]].dropna()
-                    if d.empty:
-                        # linha “vazia” por cluster para manter a estrutura
-                        for k in CLUSTERS:
-                            rows.append({
-                                "variavel": v, "cluster": k,
-                                "n_total": 0, "n_cluster": 0,
-                                "spearman_rho": np.nan, "spearman_p": np.nan,
-                                "gini_corr": np.nan, "r2_dummy": np.nan,
-                                "shapiro_p": np.nan, "ttest_t_k_vs_rest": np.nan, "ttest_p_k_vs_rest": np.nan
-                            })
-                        continue
-                
-                    x_all = d[v].to_numpy()
-                    c_all = d["_cl_code"].to_numpy()
-                
-                    for k in CLUSTERS:
-                        # dummy do fator: 1{cluster == k}
-                        y_bin = (c_all == k).astype(int)
-                        n_tot = int(len(x_all))
-                        n_k = int(y_bin.sum())
-                
-                        # Spearman(x, 1{cluster==k})
-                        if spearmanr is not None and n_tot >= 3:
-                            try:
-                                rho, pval = spearmanr(x_all, y_bin, nan_policy="omit")
-                            except Exception:
-                                rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
-                        else:
-                            rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
-                
-                        # Correlação de Gini (simétrica) entre x e o dummy
-                        gini = _gini_corr(x_all, y_bin)
-                
-                        # R² da regressão x ~ 1 + 1{cluster==k}
-                        r2 = _r2_simple(x_all, y_bin)
-                
-                        # Shapiro dentro do cluster k
-                        if shapiro is not None and n_k >= 3:
-                            try:
-                                sh_p = shapiro(x_all[y_bin == 1]).pvalue
-                            except Exception:
-                                sh_p = np.nan
+                    g = df_join[["_cl_code", v]].dropna()
+                    for c_ in [0,1,2,3]:
+                        s = g.loc[g["_cl_code"] == c_, v].dropna()
+                        n = int(s.shape[0])
+                        miss = int(g.shape[0] - n)
+                        if n == 0:
+                            desc_rows.append({"variavel": v, "cluster": c_, "n": 0, "missings": miss,
+                                              "media": np.nan, "mediana": np.nan, "desvio_padrao": np.nan,
+                                              "p25": np.nan, "p75": np.nan, "minimo": np.nan, "maximo": np.nan,
+                                              "coef_var": np.nan, "shapiro_p": np.nan})
+                            continue
+                        mu = float(s.mean()); med = float(s.median()); sd = float(s.std(ddof=1))
+                        p25 = float(np.percentile(s, 25)); p75 = float(np.percentile(s, 75))
+                        mn, mx = float(s.min()), float(s.max())
+                        cv = (sd / mu) if (np.isfinite(sd) and np.isfinite(mu) and abs(mu) > 1e-15) else np.nan
+                        if _shapiro_fn is not None and n >= 3:
+                            try: sh_p = float(_shapiro_fn(s).pvalue)
+                            except Exception: sh_p = np.nan
                         else:
                             sh_p = np.nan
-                
-                        # t-test Welch: cluster k vs demais
-                        if ttest_ind is not None:
-                            x_k = x_all[y_bin == 1]
-                            x_rest = x_all[y_bin == 0]
-                            if len(x_k) >= 2 and len(x_rest) >= 2:
-                                t_stat, p_t = ttest_ind(x_k, x_rest, equal_var=False)
-                            else:
-                                t_stat = p_t = np.nan
-                        else:
-                            t_stat = p_t = np.nan
-                
-                        rows.append({
-                            "variavel": v,
-                            "cluster": k,
-                            "n_total": n_tot,
-                            "n_cluster": n_k,
-                            "spearman_rho": rho, "spearman_p": pval,
-                            "gini_corr": gini,
-                            "r2_dummy": r2,
-                            "shapiro_p": sh_p,
-                            "ttest_t_k_vs_rest": t_stat, "ttest_p_k_vs_rest": p_t
-                        })
-                
-                df_metrics_long = pd.DataFrame(rows)
-                
-                st.markdown("**Tabela — Métricas (one-vs-rest) por variável e cluster**")
-                st.dataframe(df_metrics_long, use_container_width=True)
-                download_df(df_metrics_long, f"metricas_avancadas_factor_{ver_val}"
-                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_long")
-                
-                # Versão wide (colunas por cluster para leitura rápida)
-                wide = df_metrics_long.pivot_table(
-                    index="variavel", columns="cluster",
-                    values=["spearman_rho","gini_corr","r2_dummy","shapiro_p","ttest_p_k_vs_rest"],
-                    aggfunc="first"
-                ).sort_index(axis=1)
-                wide.columns = [f"{m}_c{c}" for (m, c) in wide.columns]
-                wide = wide.reset_index()
-                
-                st.markdown("**Tabela (wide) — métricas por cluster em colunas**")
-                st.dataframe(wide, use_container_width=True)
-                download_df(wide, f"metricas_avancadas_factor_{ver_val}"
-                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_wide")
-                # 4) Calcula métricas por variável, tratando o cluster como FATOR (0..3)
-                rows = []
-                CLUSTERS = [0, 1, 2, 3]
-                
-                for v in vars_sel_adv:
-                    d = df_join[["_cl_code", v]].dropna()
-                    if d.empty:
-                        # linha “vazia” por cluster para manter a estrutura
-                        for k in CLUSTERS:
-                            rows.append({
-                                "variavel": v, "cluster": k,
-                                "n_total": 0, "n_cluster": 0,
-                                "spearman_rho": np.nan, "spearman_p": np.nan,
-                                "gini_corr": np.nan, "r2_dummy": np.nan,
-                                "shapiro_p": np.nan, "ttest_t_k_vs_rest": np.nan, "ttest_p_k_vs_rest": np.nan
-                            })
-                        continue
-                
-                    x_all = d[v].to_numpy()
-                    c_all = d["_cl_code"].to_numpy()
-                
-                    for k in CLUSTERS:
-                        # dummy do fator: 1{cluster == k}
-                        y_bin = (c_all == k).astype(int)
-                        n_tot = int(len(x_all))
-                        n_k = int(y_bin.sum())
-                
-                        # Spearman(x, 1{cluster==k})
-                        if spearmanr is not None and n_tot >= 3:
-                            try:
-                                rho, pval = spearmanr(x_all, y_bin, nan_policy="omit")
-                            except Exception:
-                                rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
-                        else:
-                            rho = pd.Series(x_all).corr(pd.Series(y_bin), method="spearman"); pval = np.nan
-                
-                        # Correlação de Gini (simétrica) entre x e o dummy
-                        gini = _gini_corr(x_all, y_bin)
-                
-                        # R² da regressão x ~ 1 + 1{cluster==k}
-                        r2 = _r2_simple(x_all, y_bin)
-                
-                        # Shapiro dentro do cluster k
-                        if shapiro is not None and n_k >= 3:
-                            try:
-                                sh_p = shapiro(x_all[y_bin == 1]).pvalue
-                            except Exception:
-                                sh_p = np.nan
-                        else:
-                            sh_p = np.nan
-                
-                        # t-test Welch: cluster k vs demais
-                        if ttest_ind is not None:
-                            x_k = x_all[y_bin == 1]
-                            x_rest = x_all[y_bin == 0]
-                            if len(x_k) >= 2 and len(x_rest) >= 2:
-                                t_stat, p_t = ttest_ind(x_k, x_rest, equal_var=False)
-                            else:
-                                t_stat = p_t = np.nan
-                        else:
-                            t_stat = p_t = np.nan
-                
-                        rows.append({
-                            "variavel": v,
-                            "cluster": k,
-                            "n_total": n_tot,
-                            "n_cluster": n_k,
-                            "spearman_rho": rho, "spearman_p": pval,
-                            "gini_corr": gini,
-                            "r2_dummy": r2,
-                            "shapiro_p": sh_p,
-                            "ttest_t_k_vs_rest": t_stat, "ttest_p_k_vs_rest": p_t
-                        })
-                
-                df_metrics_long = pd.DataFrame(rows)
-                
-                st.markdown("**Tabela — Métricas (one-vs-rest) por variável e cluster**")
-                st.dataframe(df_metrics_long, use_container_width=True)
-                download_df(df_metrics_long, f"metricas_avancadas_factor_{ver_val}"
-                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_long")
-                
-                # Versão wide (colunas por cluster para leitura rápida)
-                wide = df_metrics_long.pivot_table(
-                    index="variavel", columns="cluster",
-                    values=["spearman_rho","gini_corr","r2_dummy","shapiro_p","ttest_p_k_vs_rest"],
-                    aggfunc="first"
-                ).sort_index(axis=1)
-                wide.columns = [f"{m}_c{c}" for (m, c) in wide.columns]
-                wide = wide.reset_index()
-                
-                st.markdown("**Tabela (wide) — métricas por cluster em colunas**")
-                st.dataframe(wide, use_container_width=True)
-                download_df(wide, f"metricas_avancadas_factor_{ver_val}"
-                            f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}_wide")
+                        desc_rows.append({"variavel": v, "cluster": c_, "n": n, "missings": miss,
+                                          "media": mu, "mediana": med, "desvio_padrao": sd,
+                                          "p25": p25, "p75": p75, "minimo": mn, "maximo": mx,
+                                          "coef_var": cv, "shapiro_p": sh_p})
+                df_desc = pd.DataFrame(desc_rows)
+                df_desc["cluster_label"] = df_desc["cluster"].map(label_map)
+                st.markdown("**Descritiva por cluster (0–3)**")
+                st.dataframe(df_desc, use_container_width=True)
+                download_df(df_desc, f"descritiva_por_cluster_{ver_val}"
+                                     f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
 
-                download_df(df_metrics, f"metricas_avancadas_{ver_val}"
-                                        f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
+                # ---------- OMNIBUS + CORRELAÇÕES ----------
+                omni_rows = []
+                for v in vars_sel_adv:
+                    d = df_join[["_cl_code", v]].dropna()
+                    if d.empty:
+                        omni_rows.append({"variavel": v, "n_total": 0,
+                                          "anova_F": np.nan, "anova_p": np.nan, "eta2": np.nan,
+                                          "kruskal_H": np.nan, "kruskal_p": np.nan,
+                                          "spearman_rho": np.nan, "spearman_p": np.nan,
+                                          "gini_corr": np.nan, "r2_simple": np.nan})
+                        continue
+                    # grupos
+                    x0 = d.loc[d["_cl_code"] == 0, v].to_numpy()
+                    x1 = d.loc[d["_cl_code"] == 1, v].to_numpy()
+                    x2 = d.loc[d["_cl_code"] == 2, v].to_numpy()
+                    x3 = d.loc[d["_cl_code"] == 3, v].to_numpy()
+                    groups = [x0, x1, x2, x3]
+
+                    # ANOVA & eta²
+                    if _anova_fn is not None and all(len(x) >= 2 for x in groups if len(x) > 0) and sum(len(x) for x in groups) >= 4:
+                        try:
+                            Fv, pA = _anova_fn(*groups)
+                            Fv, pA = float(Fv), float(pA)
+                        except Exception:
+                            Fv, pA = np.nan, np.nan
+                    else:
+                        Fv, pA = np.nan, np.nan
+                    eta2 = _eta_squared(groups)
+
+                    # Kruskal
+                    if _kruskal_fn is not None and all(len(x) >= 1 for x in groups if len(x) > 0):
+                        try:
+                            Hv, pK = _kruskal_fn(*[g for g in groups if len(g) > 0])
+                            Hv, pK = float(Hv), float(pK)
+                        except Exception:
+                            Hv, pK = np.nan, np.nan
+                    else:
+                        Hv, pK = np.nan, np.nan
+
+                    # Correlações com o código 0..3
+                    x = d[v].to_numpy(); c = d["_cl_code"].to_numpy()
+                    if _spearman_fn is not None and len(d) >= 3:
+                        try:
+                            rho, pS = _spearman_fn(x, c, nan_policy="omit")
+                            rho, pS = float(rho), float(pS)
+                        except Exception:
+                            rho = d[v].corr(d["_cl_code"], method="spearman"); pS = np.nan
+                    else:
+                        rho = d[v].corr(d["_cl_code"], method="spearman"); pS = np.nan
+                    gini = _gini_corr(x, c)
+                    r2s  = _r2_simple(x, c)
+
+                    omni_rows.append({"variavel": v, "n_total": int(len(d)),
+                                      "anova_F": Fv, "anova_p": pA, "eta2": eta2,
+                                      "kruskal_H": Hv, "kruskal_p": pK,
+                                      "spearman_rho": rho, "spearman_p": pS,
+                                      "gini_corr": gini, "r2_simple": r2s})
+                df_omni = pd.DataFrame(omni_rows)
+                st.markdown("**Omnibus (ANOVA/Kruskal) e correlações vs cluster (0–3)**")
+                st.dataframe(df_omni, use_container_width=True)
+                download_df(df_omni, f"omnibus_correlacoes_{ver_val}"
+                                     f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
+
+                # ---------- PARES (Welch t, MWU, d, Cliff, FDR-BH) ----------
+                pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+                pw_rows = []
+                for v in vars_sel_adv:
+                    g = df_join[["_cl_code", v]].dropna()
+                    for (a, b) in pairs:
+                        xa = g.loc[g["_cl_code"] == a, v].dropna().to_numpy()
+                        xb = g.loc[g["_cl_code"] == b, v].dropna().to_numpy()
+                        nA, nB = len(xa), len(xb)
+                        muA = float(np.mean(xa)) if nA else np.nan
+                        muB = float(np.mean(xb)) if nB else np.nan
+                        medA = float(np.median(xa)) if nA else np.nan
+                        medB = float(np.median(xb)) if nB else np.nan
+
+                        if _ttest_fn is not None and nA >= 2 and nB >= 2:
+                            try:
+                                t_stat, p_t = _ttest_fn(xa, xb, equal_var=False)
+                                t_stat, p_t = float(t_stat), float(p_t)
+                            except Exception:
+                                t_stat, p_t = np.nan, np.nan
+                        else:
+                            t_stat, p_t = np.nan, np.nan
+
+                        if _mw_fn is not None and nA >= 1 and nB >= 1:
+                            try:
+                                U, p_mw = _mw_fn(xa, xb, alternative="two-sided")
+                                U, p_mw = float(U), float(p_mw)
+                            except Exception:
+                                U, p_mw = np.nan, np.nan
+                        else:
+                            U, p_mw = np.nan, np.nan
+
+                        d  = _cohens_d(xa, xb)
+                        cd = _cliffs_delta(xa, xb)
+
+                        pw_rows.append({
+                            "variavel": v, "par": f"{a} vs {b}",
+                            "cluster_A": a, "cluster_B": b,
+                            "n_A": nA, "n_B": nB,
+                            "media_A": muA, "media_B": muB,
+                            "mediana_A": medA, "mediana_B": medB,
+                            "t_stat": t_stat, "p_t": p_t,
+                            "U": U, "p_mw": p_mw,
+                            "cohens_d": d, "cliffs_delta": cd,
+                        })
+
+                df_pw = pd.DataFrame(pw_rows)
+                if "p_t" in df_pw.columns:
+                    df_pw["p_t_fdr_bh"] = _bh_fdr(df_pw["p_t"])
+                df_pw["cluster_A_label"] = df_pw["cluster_A"].map(label_map)
+                df_pw["cluster_B_label"] = df_pw["cluster_B"].map(label_map)
+
+                st.markdown("**Comparações par-a-par entre clusters (0–3)**")
+                st.dataframe(df_pw, use_container_width=True)
+                download_df(df_pw, f"comparacoes_par_a_par_{ver_val}"
+                                 f"{'_'+str(year_sel) if 'year_sel' in locals() else ''}")
             else:
                 st.info("Selecione ao menos uma variável para calcular as métricas.")
-
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas (somente leitura/exibição)
@@ -1958,6 +1953,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
