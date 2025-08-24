@@ -1403,7 +1403,7 @@ with tab2:
     preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="clu_cluster_col")
 
-    # ---------- quadras (somente colunas necessárias) ----------
+        # ---------- quadras (somente colunas necessárias) ----------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None:
         try:
@@ -1412,29 +1412,26 @@ with tab2:
         except Exception as e:
             st.error(f"Não foi possível carregar as quadras (Data/mapa/quadras.gpkg). Detalhe: {e}")
             st.stop()
-
+    
     join_quad = next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not join_quad:
         st.error("A camada de quadras não possui coluna 'SQ'."); st.stop()
-
-    # Mantém só geometry + SQ (deixa leve)
-    gdfq = gdf_quadras[[join_quad, gdf_quadras.geometry.name]].copy()
-
-    # ---------- normaliza SQ e resolve duplicados ----------
-    df_est = df_est.copy()
-    gdfq["_SQ_norm"] = gdfq[join_quad].apply(_norm_sq_6)
-    df_est["_SQ_norm"] = df_est[join_est].apply(_norm_sq_6)
-    df_est["_cl_code"] = df_est[cluster_col].apply(_to_int_code).fillna(-1)
-    df_est = df_est.sort_values(["_SQ_norm", "_cl_code"])      # maior estágio por último
-    df_est_dedup = df_est.drop_duplicates("_SQ_norm", keep="last")
-
-    # ---------- (opcional) Recorte ANTES do merge para reduzir linhas ----------
+    
+    # Mantém só geometry + SQ (GERAL, sem recorte)
+    geom_col = gdf_quadras.geometry.name
+    gdfq_all = gdf_quadras[[join_quad, geom_col]].copy()
+    gdfq_all["_SQ_norm"] = gdfq_all[join_quad].apply(_norm_sq_6)
+    
+    # ---------- (opcional) Recorte (gera um subconjunto, sem mexer no GERAL) ----------
     st.markdown("#### Mapa — Recortes (opcional)")
     rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "Data/Mapa/recortes", "data/mapa/recortes"])
     rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
     gdf_rec = None
+    gdfq_rec = None
+    
     if rec_files:
-        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files], index=0, key="clu_rec_file")
+        rec_sel = st.selectbox("Arquivo de recorte", ["(sem recorte)"] + [f["name"] for f in rec_files],
+                               index=0, key="clu_rec_file")
         if rec_sel != "(sem recorte)":
             rec_obj = next(x for x in rec_files if x["name"] == rec_sel)
             gdf_rec = load_gpkg(repo, rec_obj["path"], branch)
@@ -1443,55 +1440,53 @@ with tab2:
                 gdf_rec = gdf_rec.copy()
                 gdf_rec["_SQ_norm"] = gdf_rec[join_rec].apply(_norm_sq_6)
                 sq_keep = set(gdf_rec["_SQ_norm"].dropna().unique().tolist())
-                gdfq = gdfq[gdfq["_SQ_norm"].isin(sq_keep)].copy()
-
-    # ---------- merge leve ----------
-    gdfc = gdfq.merge(df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]], on="_SQ_norm", how="left")
-
-    # mantém apenas 0..3; deixa NA quando for outro valor
-    gdfc["_cl_code_clean"] = gdfc["_cl_code"].where(gdfc["_cl_code"].isin([0, 1, 2, 3]))
+                gdfq_rec = gdfq_all[gdfq_all["_SQ_norm"].isin(sq_keep)].copy()
     
-    # converte para Int64 (aceita NA) e mapeia rótulos
-    _codes = gdfc["_cl_code_clean"].astype("Int64")           # <- NA-safe
-    lbl_mapped = _codes.map(label_map)                        # ints 0..3 → rótulos
-    gdfc["cluster_lbl"] = lbl_mapped.fillna(gdfc[cluster_col].astype("string"))
+    # ---------- merge + estilização em função para reusar ----------
+    def _build_colored(gdfq_subset: "GeoDataFrame"):
+        g = gdfq_subset.merge(
+            df_est_dedup[["_SQ_norm", cluster_col, "_cl_code"]],
+            on="_SQ_norm", how="left"
+        )
+        # mantém apenas 0..3 e rotula
+        g["_cl_code_clean"] = g["_cl_code"].where(g["_cl_code"].isin([0, 1, 2, 3]))
+        codes = g["_cl_code_clean"].astype("Int64")
+        lbl = codes.map(label_map)
+        g["cluster_lbl"] = lbl.fillna(g[cluster_col].astype("string"))
     
-    # ordenação da legenda usando os códigos presentes (0→3) + demais categorias
-    codes_present = [int(x) for x in _codes.dropna().unique().tolist()]
-    labels_from_codes = [label_map[c] for c in sorted(codes_present)]
-    other_labels = sorted(
-    [l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes],
-    key=str
-    )
-    cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
-
-    labels_from_codes = [label_map[c] for c in codes_present]
-    other_labels = sorted([l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
-    cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
-    palette = pick_categorical(len(cats_sorted))
-    cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
-
-    # ---------- cor como coluna (sem loop em features) ----------
-    gdfc = gdfc[[gdfc.geometry.name, "_SQ_norm", "cluster_lbl"]].copy()
-    gdfc["fill_color"] = gdfc["cluster_lbl"].apply(
-    lambda lab: hex_to_rgba(cmap.get(lab, "#999999"))
-    )
-
-    # ---------- simplificação opcional ----------
-    if simplify_tol and simplify_tol > 0:
-        try:
-            gdfc[gdfc.geometry.name] = gdfc[gdfc.geometry.name].simplify(simplify_tol, preserve_topology=True)
-        except Exception:
-            pass
-
-    # ---------- GeoJSON & MAPAS ----------
-    # (to_json já carrega 'fill_color' como propriedade; sem loops Python)
-    geojson_main = make_geojson(gdfc)
-
+        # paleta (0→3 primeiro, depois quaisquer outras categorias)
+        codes_present = [int(x) for x in codes.dropna().unique().tolist()]
+        labels_from_codes = [label_map[c] for c in sorted(codes_present)]
+        other_labels = sorted([l for l in g["cluster_lbl"].dropna().unique()
+                               if l not in labels_from_codes], key=str)
+        cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
+        palette = pick_categorical(len(cats_sorted))
+        local_cmap = {lab: palette[i] for i, lab in enumerate(cats_sorted)}
+    
+        g = g[[geom_col, "_SQ_norm", "cluster_lbl"]].copy()
+        g["fill_color"] = g["cluster_lbl"].apply(lambda lab: hex_to_rgba(local_cmap.get(lab, "#999999")))
+        if simplify_tol and simplify_tol > 0:
+            try:
+                g[geom_col] = g[geom_col].simplify(simplify_tol, preserve_topology=True)
+            except Exception:
+                pass
+        return g, cats_sorted, local_cmap
+    
+    # GERAL
+    gdfc_main, cats_sorted, cmap = _build_colored(gdfq_all)
+    geojson_main = make_geojson(gdfc_main)
+    
+    # RECORTE (se houver)
+    gdfc_rec = None
+    if gdfq_rec is not None:
+        gdfc_rec, _, _ = _build_colored(gdfq_rec)
+    
+    # ---------- MAPAS ----------
     colM, colL = st.columns([4.5, 1], gap="large")
     with colM:
-        st.markdown("#### Mapa — Clusters por SQ")
-        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="clu_base")
+        st.markdown("#### Mapa — Clusters por SQ (GERAL)")
+        base_map = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
+                            index=0, horizontal=True, key="clu_base")
         lyr = render_geojson_layer(geojson_main, name="clusters")
         if base_map.startswith("Satélite"):
             deck([lyr], satellite=True)
@@ -1501,12 +1496,11 @@ with tab2:
         st.markdown("**Legenda — Estágio**")
         for lab in cats_sorted:
             _legend_row(cmap[lab], lab)
-
-    # ---------- mapa do recorte (se houver) com MESMAS cores ----------
-    if gdf_rec is not None:
+    
+    # mapa do RECORTE (apenas se houver)
+    if gdf_rec is not None and gdfc_rec is not None:
         st.markdown("#### Mapa — Recorte selecionado")
-        # Reusa gdfc já filtrado por recorte (lá em cima)
-        geojson_rec = make_geojson(gdfc)
+        geojson_rec = make_geojson(gdfc_rec)
         lyr_rec = render_geojson_layer(geojson_rec, name="clusters_recorte")
         border = render_line_layer(make_geojson(gdf_rec), name="recorte")
         colRm, colRl = st.columns([4.5, 1], gap="large")
@@ -1519,8 +1513,9 @@ with tab2:
             st.markdown("**Legenda — Recorte**")
             for lab in cats_sorted:
                 _legend_row(cmap[lab], lab)
-
+    
     st.divider()
+
 
 # ------------------------------------------
 # 2.x) Métricas por cluster — prefere `univariadas` (fallback `metrica`)
@@ -1871,6 +1866,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
