@@ -1451,8 +1451,8 @@ with tab2:
     other_labels = sorted(
     [l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes],
     key=str
-)
-cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
+    )
+    cats_sorted = labels_from_codes + [l for l in other_labels if l not in labels_from_codes]
 
     labels_from_codes = [label_map[c] for c in codes_present]
     other_labels = sorted([l for l in gdfc["cluster_lbl"].dropna().unique() if l not in labels_from_codes], key=str)
@@ -1704,6 +1704,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
