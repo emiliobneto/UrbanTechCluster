@@ -1522,113 +1522,60 @@ with tab2:
 
     st.divider()
 
-    # -----------------------------
-    # (seus blocos de MÉTRICAS e SPEARMAN podem continuar abaixo, inalterados)
-    # -----------------------------
+   # ------------------------------------------
+# 2.x) Spearman (pares) — somente TABELA
+# ------------------------------------------
+st.subheader("Spearman (pares) — tabela")
 
-    # ------------------------------------------
-    # 2.7 Spearman (pares) — tabela + heatmap
-    # ------------------------------------------
-    st.subheader("Spearman (pares) — tabela e heatmap")
-    base_sp = pick_existing_dir(repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"])
-    df_sp = None
+base_sp = pick_existing_dir(
+    repo, branch,
+    ["Data/analises/original", "Data/Analises/original", "data/analises/original"]
+)
+df_sp = None
+
+# procura arquivos com 'spearman' e 'pairs'
+sp_candidates = [
+    f for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
+    if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
+]
+
+# fallback para winsorizados, se necessário
+if not sp_candidates:
+    base_sp_alt = pick_existing_dir(
+        repo, branch,
+        ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"]
+    )
     sp_candidates = [
-        f for f in list_files(repo, base_sp, branch, (".csv", ".parquet"))
+        f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet"))
         if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
     ]
-    if not sp_candidates:
-        base_sp_alt = pick_existing_dir(repo, branch, ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"])
-        sp_candidates = [
-            f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet"))
-            if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())
-        ]
 
-    if sp_candidates:
-        sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])
-        sp_sel = st.selectbox("Selecione arquivo Spearman (pares)", [f["name"] for f in sp_candidates], index=0, key="clu_spearman_sel")
-        sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
-        st.caption(f"Spearman: `{sp_obj['path']}`")
-        df_sp = load_parquet(repo, sp_obj["path"], branch) if sp_obj["name"].endswith(".parquet") \
-                else load_csv(repo, sp_obj["path"], branch)
-        spearman_title = sp_obj["name"]
+if sp_candidates:
+    sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])
+    sp_sel = st.selectbox(
+        "Selecione arquivo Spearman (pares)",
+        [f["name"] for f in sp_candidates],
+        index=0,
+        key="clu_spear_pairs_sel"  # chave única
+    )
+    sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
+    st.caption(f"Spearman (pares): `{sp_obj['path']}`")
 
-    if df_sp is not None:
-        st.markdown(f"**Tabela — {spearman_title}**")
-        st.dataframe(df_sp, use_container_width=True)
+    df_sp = (
+        load_parquet(repo, sp_obj["path"], branch)
+        if sp_obj["name"].lower().endswith(".parquet")
+        else load_csv(repo, sp_obj["path"], branch)
+    )
 
-        import re as _re
-        cand_i = next((c for c in df_sp.columns if _re.search(r"(var|col).*a$", c.lower())), None)
-        cand_j = next((c for c in df_sp.columns if _re.search(r"(var|col).*b$", c.lower())), None)
-        cand_r = next((c for c in df_sp.columns if any(k in c.lower() for k in ["rho","spearman","corr","coef"])), None)
-        if not (cand_i and cand_j and cand_r):
-            text_cols = [c for c in df_sp.columns if not pd.api.types.is_numeric_dtype(df_sp[c])]
-            num_cols = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
-            if len(text_cols) >= 2 and num_cols:
-                cand_i, cand_j, cand_r = text_cols[0], text_cols[1], num_cols[0]
-
-        if cand_i and cand_j and cand_r:
-            M = df_sp.pivot_table(index=cand_i, columns=cand_j, values=cand_r, aggfunc="mean")
-            M = M.combine_first(M.T)
-            M = np.maximum(M, M.T)
-            fig = px.imshow(M, text_auto=False, color_continuous_scale="Inferno",
-                            title="Heatmap — Spearman (pares → matriz)")
-            st.plotly_chart(fig, use_container_width=True)
-            # download PNG (se kaleido disponível) e CSV
-            try:
-                import plotly.io as pio
-                png = pio.to_image(fig, format="png", scale=3)  # ~300dpi
-                st.download_button("⬇️ Baixar heatmap (PNG)", png, file_name="spearman_heatmap.png", mime="image/png", key="dl_spear_png")
-            except Exception:
-                pass
-            try:
-                st.download_button("⬇️ Baixar matriz (CSV)", pd.DataFrame(M).to_csv().encode("utf-8"),
-                                   file_name="spearman_matrix.csv", mime="text/csv", key="dl_spear_csv")
-            except Exception:
-                pass
-        else:
-            st.caption("Não consegui identificar as colunas para montar o heatmap automaticamente.")
-    else:
-        st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
-    # -----------------------------
-    # 2.8) Spearman (pares) — tabela + heatmap (código anterior)
-    # -----------------------------
-    st.subheader("Spearman (pares) — tabela e heatmap")
-    base_sp = pick_existing_dir(repo, branch, ["Data/analises/original", "Data/Analises/original", "data/analises/original"])
-    df_sp = None
-    sp_candidates = [f for f in list_files(repo, base_sp, branch, (".csv", ".parquet")) if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())]
-    if not sp_candidates:
-        base_sp_alt = pick_existing_dir(repo, branch, ["Data/analises/winsorizados", "Data/Analises/winsorizados", "data/analises/winsorizados"])
-        sp_candidates = [f for f in list_files(repo, base_sp_alt, branch, (".csv", ".parquet")) if ("spearman" in f["name"].lower()) and ("pairs" in f["name"].lower())]
-
-    if sp_candidates:
-        sp_candidates = sorted(sp_candidates, key=lambda x: x["name"])
-        sp_sel = st.selectbox("Selecione arquivo Spearman (pares)", [f["name"] for f in sp_candidates], index=0, key="clu_spearman_sel")
-        sp_obj = next(x for x in sp_candidates if x["name"] == sp_sel)
-        df_sp = load_parquet(repo, sp_obj["path"], branch) if sp_obj["name"].endswith(".parquet") else load_csv(repo, sp_obj["path"], branch)
-        spearman_title = sp_obj["name"]
-
-    if df_sp is not None:
-        st.markdown(f"**Tabela — {spearman_title}**")
-        st.dataframe(df_sp, use_container_width=True)
-        import re as _re
-        cand_i = next((c for c in df_sp.columns if _re.search(r"(var|col).*a$", c.lower())), None)
-        cand_j = next((c for c in df_sp.columns if _re.search(r"(var|col).*b$", c.lower())), None)
-        cand_r = next((c for c in df_sp.columns if any(k in c.lower() for k in ["rho","spearman","corr","coef"])), None)
-        if not (cand_i and cand_j and cand_r):
-            text_cols = [c for c in df_sp.columns if not pd.api.types.is_numeric_dtype(df_sp[c])]
-            num_cols  = [c for c in df_sp.columns if pd.api.types.is_numeric_dtype(df_sp[c])]
-            if len(text_cols) >= 2 and num_cols:
-                cand_i, cand_j, cand_r = text_cols[0], text_cols[1], num_cols[0]
-        if cand_i and cand_j and cand_r:
-            M = df_sp.pivot_table(index=cand_i, columns=cand_j, values=cand_r, aggfunc="mean")
-            M = M.combine_first(M.T); M = np.maximum(M, M.T)
-            fig = px.imshow(M, text_auto=False, color_continuous_scale="Inferno", title="Heatmap — Spearman (pares → matriz)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.caption("Não consegui identificar as colunas para montar o heatmap automaticamente.")
-    else:
-        st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
-
+    # mostra apenas a tabela + opção de download
+    st.dataframe(df_sp, use_container_width=True)
+    try:
+        base_nm = os.path.splitext(sp_obj["name"])[0]
+    except Exception:
+        base_nm = "spearman_pairs"
+    download_df(df_sp, f"{base_nm}_tabela")
+else:
+    st.info("Arquivo de Spearman (pares) não encontrado nas pastas de análise.")
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas (somente leitura/exibição)
 # -----------------------------------------------------------------------------
@@ -1717,6 +1664,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
