@@ -18,26 +18,31 @@ st.set_page_config(
     layout="wide",
 )
 
-TITLE = (
-    "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA "
-    "E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
-)
-st.title(TITLE)
-
-# ——— Estilo global (largura e legibilidade das abas) ———
+# ✅ CSS vem antes do título e com seletores mais seguros
 st.markdown(
     """
     <style>
-      .block-container { max-width: 1600px; padding-top: 0.75rem; }
-      .stTabs [data-baseweb="tab"] p {
-        margin: 0;
+      /* Compat: versões antigas e novas */
+      :root .block-container, :root .stMainBlockContainer {
+        max-width: 1600px;
+        padding-top: 1.25rem; /* mais espaço pro título */
+      }
+      /* Tabs: limite o escopo aos botões das tabs */
+      div[data-testid="stTabs"] button p {
+        margin: 0 !important;
         font-size: 15px !important;
-        color: rgba(17,17,17,1) !important; /* força cor escura */
+        color: rgba(17,17,17,1) !important;
       }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+TITLE = (
+    "MODELO DE REDE NEURAL ARTIFICIAL PARA MAPEAMENTO DE CLUSTERS DE INTELIGÊNCIA "
+    "E SUA APLICAÇÃO NO MUNICÍPIO DE SÃO PAULO"
+)
+st.title(TITLE)
 
 
 # ==========================
@@ -2202,6 +2207,7 @@ with tab4:
         load_parquet=load_parquet,
         load_csv=load_csv,
     )
+
 
 
 
