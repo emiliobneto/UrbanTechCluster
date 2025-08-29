@@ -476,6 +476,149 @@ def pairs_to_matrix(df_pairs, i_col, j_col, val_col, sym_max=True):
         m = pd.DataFrame(np.maximum(m.values, m.T.values), index=m.index, columns=m.columns)
     return m
 
+import io
+import json
+import unicodedata
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+# --------------------------------------------------------------------------------------
+# Tab 4 — ANN: métricas, relatórios e mapas (Data/ANN)
+# --------------------------------------------------------------------------------------
+# Esta função DEPENDE dos helpers já existentes no seu app principal.
+# Para evitar import circular, passamos os helpers como parâmetros.
+# Veja no final deste arquivo o snippet de como chamá-la no main.
+# --------------------------------------------------------------------------------------
+
+
+# --------------------------- Utilidades locais ----------------------------------------
+
+def _norm_text(x: str) -> str:
+    """Normaliza strings: remove acentos e baixa caixa."""
+    s = unicodedata.normalize("NFKD", str(x))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.lower().strip()
+
+
+def _pick_dir_ann(repo, branch, pick_existing_dir):
+    return pick_existing_dir(
+        repo,
+        branch,
+        ["Data/ANN", "data/ANN", "data/ann", "Data/Ann", "ANN"],
+    )
+
+
+def _load_if_exists(repo, branch, list_files, load_csv, filename_globs: list[str]):
+    """Procura 1º arquivo que case com os padrões (case-insensitive) dentro de Data/ANN."""
+    base_dir = _pick_dir_ann(repo, branch, pick_existing_dir)
+    files = list_files(repo, base_dir, branch, exts=(".csv", ".txt", ".json", ".parquet"))
+    # tenta match por nome exato primeiro
+    for pat in filename_globs:
+        for f in files:
+            if _norm_text(f["name"]) == _norm_text(pat):
+                p = f["path"]
+                if p.lower().endswith(".parquet"):
+                    try:
+                        return pd.read_parquet(io.BytesIO(load_parquet(repo, p, branch).to_parquet()))
+                    except Exception:
+                        pass
+                if p.lower().endswith(".csv"):
+                    return load_csv(repo, p, branch)
+                if p.lower().endswith(".txt"):
+                    # devolve bytes/texto cru dentro de DataFrame com col=__raw__
+                    try:
+                        from io import BytesIO
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw__": [b.decode("utf-8", errors="replace")]})
+                    except Exception:
+                        return None
+                if p.lower().endswith(".json"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw_json__": [json.loads(b.decode("utf-8", errors="replace"))]})
+                    except Exception:
+                        return None
+    # senão tenta por "contains"
+    for pat in filename_globs:
+        for f in files:
+            if _norm_text(pat) in _norm_text(f["name"]):
+                p = f["path"]
+                if p.lower().endswith(".parquet"):
+                    try:
+                        return pd.read_parquet(io.BytesIO(load_parquet(repo, p, branch).to_parquet()))
+                    except Exception:
+                        pass
+                if p.lower().endswith(".csv"):
+                    return load_csv(repo, p, branch)
+                if p.lower().endswith(".txt"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw__": [b.decode("utf-8", errors="replace")]})
+                    except Exception:
+                        return None
+                if p.lower().endswith(".json"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw_json__": [json.loads(b.decode("utf-8", errors="replace"))]})
+                    except Exception:
+                        return None
+    return None
+
+
+def _maybe_float(s):
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+
+def _parse_classification_report_text(text: str) -> pd.DataFrame:
+    """Extrai tabela do classification_report (texto sklearn)."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    rows = []
+    for ln in lines:
+        # Ex.: "classe    0.82    0.79    0.80    1234"
+        parts = [p for p in ln.strip().split() if p]
+        if len(parts) >= 5 and parts[0].lower() not in {"accuracy"}:
+            label = " ".join(parts[:-4])
+            prec, rec, f1, sup = parts[-4:]
+            rows.append({
+                "label": label,
+                "precision": _maybe_float(prec),
+                "recall": _maybe_float(rec),
+                "f1": _maybe_float(f1),
+                "support": _maybe_float(sup),
+            })
+        elif ln.lower().startswith("accuracy"):
+            # linha "accuracy" costuma ser: accuracy 0.84 X 12345
+            tokens = ln.split()
+            try:
+                acc = float(tokens[1])
+                rows.append({"label": "accuracy", "precision": np.nan, "recall": np.nan, "f1": acc, "support": np.nan})
+            except Exception:
+                pass
+    return pd.DataFrame(rows)
+
+
+def _cols_detect_epoch_metrics(df: pd.DataFrame):
+    cols = {c.lower(): c for c in df.columns}
+    epoch = cols.get("epoch") or next((c for c in df.columns if _norm_text(c) in {"epoca", "epocas"}), None)
+    # mapeia métricas comuns
+    metrics = []
+    for c in df.columns:
+        lc = c.lower()
+        if any(k in lc for k in ["loss", "accuracy", "acc", "auc", "precision", "recall", "f1", "mae", "mse", "rmse"]):
+            metrics.append(c)
+    return epoch, sorted(set(metrics))
+
+
+def _cat_palette_from_values(values, pick_categorical):
+    cats = [str(v) for v in pd.Series(values).dropna().unique().tolist()]
+    palette = pick_categorical(len(cats))
+    return {cats[i]: palette[i] for i in range(len(cats))}
+
 
 # ==========================
 # PCA — helpers e renderização (aba 4)
@@ -833,6 +976,301 @@ def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parq
     else:
         st.info("Arquivo não reconhecido como pipeline. Exibindo preview:")
         st.dataframe(df_pipe.head(), use_container_width=True)
+
+# --------------------------- Função principal -----------------------------------------
+
+def render_ann_tab(
+    *,
+    repo,
+    branch,
+    # helpers obrigatórios vindos do app principal
+    pick_existing_dir,
+    list_files,
+    load_parquet,
+    load_csv,
+    load_gpkg,
+    github_fetch_bytes,
+    make_geojson,
+    ensure_wgs84,
+    hex_to_rgba,
+    pick_categorical,
+    render_geojson_layer,
+    render_line_layer,
+    render_point_layer,
+    osm_basemap_deck,
+    deck,
+):
+    """Renderiza toda a **Aba 4 — ANN** lendo de `Data/ANN`.
+
+    Se algum arquivo não existir, a seção correspondente mostra um aviso e segue.
+    """
+
+    st.subheader("🧠 Rede Neural — Métricas e Resultados (Data/ANN)")
+    ann_dir = _pick_dir_ann(repo, branch, pick_existing_dir)
+    st.caption(f"Diretório base: `{ann_dir}`")
+
+    # ==================================================================================
+    # 1) Histórico por época (val_metrics_per_epoch.csv / keras_history.csv / metrics_over_epochs.csv)
+    # ==================================================================================
+    st.markdown("### 📈 Evolução por época")
+    history_candidates = [
+        "val_metrics_per_epoch.csv",
+        "metrics_over_epochs.csv",
+        "keras_history.csv",
+    ]
+
+    any_history = False
+    for name in history_candidates:
+        df_hist = _load_if_exists(repo, branch, list_files, load_csv, [name])
+        if isinstance(df_hist, pd.DataFrame) and not df_hist.empty and "__raw__" not in df_hist.columns:
+            any_history = True
+            st.markdown(f"**Arquivo:** `{name}`")
+            epoch_col, metric_cols = _cols_detect_epoch_metrics(df_hist)
+            if not metric_cols:
+                st.info("Nenhuma métrica reconhecida.")
+            else:
+                for m in metric_cols:
+                    ycols = [m]
+                    # tenta achar versão 'val_' da mesma métrica
+                    for alt in [f"val_{m}", f"val-{m}", f"val{m}"]:
+                        if alt in df_hist.columns:
+                            ycols.append(alt)
+                            break
+                    fig = px.line(
+                        df_hist,
+                        x=epoch_col or df_hist.index,
+                        y=ycols,
+                        markers=True,
+                        title=f"{m} por época",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            st.divider()
+    if not any_history:
+        st.info("Não encontrei arquivos de histórico por época em Data/ANN.")
+
+    # ==================================================================================
+    # 2) AUC por classe (auc_summary.csv)
+    # ==================================================================================
+    st.markdown("### 📊 AUC por classe")
+    df_auc = _load_if_exists(repo, branch, list_files, load_csv, ["auc_summary.csv", "roc_auc.csv"]) 
+    if isinstance(df_auc, pd.DataFrame) and not df_auc.empty and "__raw__" not in df_auc.columns:
+        cols = {c.lower(): c for c in df_auc.columns}
+        class_col = cols.get("class") or cols.get("label") or cols.get("classe") or list(df_auc.columns)[0]
+        auc_col = cols.get("auc") or cols.get("roc_auc") or list(df_auc.columns)[1]
+        fig = px.bar(df_auc, x=class_col, y=auc_col, title="AUC por classe")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df_auc, use_container_width=True)
+    else:
+        st.info("auc_summary.csv não encontrado.")
+
+    # ==================================================================================
+    # 3) Classification report (classification_report.txt)
+    # ==================================================================================
+    st.markdown("### 🧾 Classification report")
+    df_cr_raw = _load_if_exists(repo, branch, list_files, load_csv, ["classification_report.txt", "classification_report.json"])
+    if isinstance(df_cr_raw, pd.DataFrame) and not df_cr_raw.empty:
+        if "__raw_json__" in df_cr_raw.columns:
+            # já veio como JSON -> vira tabela
+            data = df_cr_raw["__raw_json__"].iloc[0]
+            try:
+                df_cr = pd.DataFrame(data).T.reset_index().rename(columns={"index": "label"})
+            except Exception:
+                df_cr = pd.json_normalize(data)
+        elif "__raw__" in df_cr_raw.columns:
+            text = df_cr_raw["__raw__"].iloc[0]
+            df_cr = _parse_classification_report_text(text)
+        else:
+            df_cr = df_cr_raw.copy()
+        if not df_cr.empty and "label" in df_cr.columns:
+            st.dataframe(df_cr, use_container_width=True)
+            if "f1" in df_cr.columns:
+                fig = px.bar(df_cr[df_cr["label"].str.lower() != "accuracy"], x="label", y="f1", title="F1-score por classe")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Não consegui extrair a tabela do classification_report.")
+    else:
+        st.info("classification_report.txt não encontrado.")
+
+    # ==================================================================================
+    # 4) Testes de hipótese (hypothesis_tests.csv)
+    # ==================================================================================
+    st.markdown("### 🧪 Testes de hipótese")
+    df_ht = _load_if_exists(repo, branch, list_files, load_csv, ["hypothesis_tests.csv"]) 
+    if isinstance(df_ht, pd.DataFrame) and not df_ht.empty and "__raw__" not in df_ht.columns:
+        cols = {c.lower(): c for c in df_ht.columns}
+        name_col = cols.get("metric") or cols.get("name") or cols.get("teste") or list(df_ht.columns)[0]
+        p_col = cols.get("p") or cols.get("pvalue") or cols.get("p_value") or cols.get("p-val")
+        if p_col:
+            df_ht["mlog10"] = -np.log10(pd.to_numeric(df_ht[p_col], errors="coerce").clip(lower=1e-300))
+            fig = px.bar(df_ht.sort_values("mlog10", ascending=False), x=name_col, y="mlog10", title="-log10(p)")
+            fig.add_hline(y=-np.log10(0.05))
+            st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df_ht, use_container_width=True)
+    else:
+        st.info("hypothesis_tests.csv não encontrado.")
+
+    # ==================================================================================
+    # 5) Resumo de métricas (metrics_summary.csv)
+    # ==================================================================================
+    st.markdown("### 🧮 Resumo de métricas")
+    df_ms = _load_if_exists(repo, branch, list_files, load_csv, ["metrics_summary.csv"]) 
+    if isinstance(df_ms, pd.DataFrame) and not df_ms.empty and "__raw__" not in df_ms.columns:
+        st.dataframe(df_ms, use_container_width=True)
+        # tenta plotar todas as colunas numéricas por linha
+        num_cols = [c for c in df_ms.columns if pd.api.types.is_numeric_dtype(df_ms[c])]
+        if len(num_cols) >= 1:
+            melted = df_ms.melt(id_vars=[c for c in df_ms.columns if c not in num_cols], value_vars=num_cols, var_name="metric", value_name="value")
+            if "metric" in melted.columns and "value" in melted.columns:
+                fig = px.bar(melted, x="metric", y="value", title="Métricas (agregadas)")
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("metrics_summary.csv não encontrado.")
+
+    # ==================================================================================
+    # 6) Configs e scaler (inference_config.json / run_config.json / scaler_params.json)
+    # ==================================================================================
+    st.markdown("### ⚙️ Configurações e scaler")
+    for fname in ["inference_config.json", "run_config.json", "scaler_params.json"]:
+        df_cfg = _load_if_exists(repo, branch, list_files, load_csv, [fname])
+        if isinstance(df_cfg, pd.DataFrame) and not df_cfg.empty and "__raw_json__" in df_cfg.columns:
+            st.markdown(f"**{fname}**")
+            st.json(df_cfg["__raw_json__"].iloc[0])
+            if fname == "scaler_params.json":
+                params = df_cfg["__raw_json__"].iloc[0]
+                for key in ["mean_", "scale_"]:
+                    if key in params and isinstance(params[key], (list, tuple)) and len(params[key]) > 0:
+                        dfp = pd.DataFrame({"feature": list(range(len(params[key]))), key: params[key]})
+                        fig = px.bar(dfp, x="feature", y=key, title=f"Scaler: {key}")
+                        st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info(f"{fname} não encontrado.")
+
+    # ==================================================================================
+    # 7) Mapas lado a lado (df25_com_previsoes.csv): Estágio vs Predicted class
+    # ==================================================================================
+    st.markdown("### 🗺️ Mapas — Estágio de clusterização × Predicted class")
+    df_pred = _load_if_exists(repo, branch, list_files, load_csv, ["df25_com_previsoes.csv"]) 
+    if isinstance(df_pred, pd.DataFrame) and not df_pred.empty and "__raw__" not in df_pred.columns:
+        # Detecta colunas
+        cols = list(df_pred.columns)
+        cols_norm = {_norm_text(c): c for c in cols}
+        # SQ
+        sq_col = next((c for c in cols if _norm_text(c) in {"sq"}), None)
+        if sq_col is None:
+            sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
+        # Estágio de clusterização
+        est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
+        if est_col is None:
+            est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
+        # Predicted class
+        pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
+        if pred_col is None:
+            pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
+
+        if not sq_col:
+            st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.csv.")
+            return
+        if not est_col or not pred_col:
+            st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
+            st.dataframe(df_pred.head(), use_container_width=True)
+            return
+
+        # Carrega quadras (reuso do cache da Aba 1, se existir)
+        gdf_quadras = st.session_state.get("gdf_quadras_cached")
+        if gdf_quadras is None or gdf_quadras.empty:
+            try:
+                gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
+                st.session_state["gdf_quadras_cached"] = gdf_quadras
+            except Exception as e:
+                st.error(f"Falha carregando quadras.gpkg: {e}")
+                return
+        geom_name = gdf_quadras.geometry.name
+        sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
+        if not sq_geo_col:
+            st.error("A camada de quadras não possui coluna 'SQ'.")
+            return
+
+        # Merge
+        dfp = df_pred[[sq_col, est_col, pred_col]].copy()
+        dfp.columns = ["SQ", "estagio", "predicted"]
+        gdf = gdf_quadras[[sq_geo_col, geom_name]].merge(dfp, left_on=sq_geo_col, right_on="SQ", how="left")
+        gdf = ensure_wgs84(gdf)
+
+        # Paletas
+        cmap_est = _cat_palette_from_values(gdf["estagio"], pick_categorical)
+        cmap_pred = _cat_palette_from_values(gdf["predicted"], pick_categorical)
+
+        # GeoJSONs com cores
+        def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
+            gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
+            for feat in gj.get("features", []):
+                v = feat.get("properties", {}).get(value_col, None)
+                hexc = cmap.get(str(v), "#999999")
+                feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+            return gj
+
+        gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
+        gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
+
+        # Plano de fundo
+        base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
+
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            st.markdown("**Estágio de clusterização**")
+            lyr = render_geojson_layer(gj_est, name="estagio")
+            if base.startswith("Satélite"):
+                deck([lyr], satellite=True)
+            else:
+                osm_basemap_deck([lyr])
+            st.markdown("**Legenda — Estágio**")
+            for k, hexc in cmap_est.items():
+                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("**Predicted class**")
+            lyr = render_geojson_layer(gj_pred, name="predicted")
+            if base.startswith("Satélite"):
+                deck([lyr], satellite=True)
+            else:
+                osm_basemap_deck([lyr])
+            st.markdown("**Legenda — Predicted**")
+            for k, hexc in cmap_pred.items():
+                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+    else:
+        st.info("df25_com_previsoes.csv não encontrado.")
+
+    # ==================================================================================
+    # 8) (Opcional) Distribuições de score / matriz de confusão se existir 'test_predictions_with_meta.csv'
+    # ==================================================================================
+    with st.expander("Extras — distribuições e matriz de confusão"):
+        df_meta = _load_if_exists(repo, branch, list_files, load_csv, ["test_predictions_with_meta.csv"]) 
+        if isinstance(df_meta, pd.DataFrame) and not df_meta.empty and "__raw__" not in df_meta.columns:
+            cols = {c.lower(): c for c in df_meta.columns}
+            y_true = cols.get("y_true") or cols.get("true") or cols.get("label")
+            y_pred = cols.get("y_pred") or cols.get("pred") or cols.get("predicted")
+            prob_cols = [c for c in df_meta.columns if c.lower().startswith("prob_")]
+            if y_true and y_pred:
+                # matriz de confusão
+                try:
+                    from sklearn.metrics import confusion_matrix
+                    import itertools
+                    labels = sorted(pd.unique(pd.concat([df_meta[y_true], df_meta[y_pred]]).astype(str)))
+                    cm = confusion_matrix(df_meta[y_true].astype(str), df_meta[y_pred].astype(str), labels=labels)
+                    df_cm = pd.DataFrame(cm, index=labels, columns=labels)
+                    fig = px.imshow(df_cm, text_auto=True, title="Matriz de confusão", aspect="auto")
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pass
+            if prob_cols:
+                mlong = df_meta.melt(value_vars=prob_cols, var_name="classe", value_name="prob")
+                fig = px.histogram(mlong, x="prob", facet_col="classe", nbins=30, title="Distribuição de probabilidades")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("Arquivo test_predictions_with_meta.csv ausente — ignorando extras.")
 
 
 # ==========================
@@ -2196,17 +2634,30 @@ with tab3:
 
 
 # -----------------------------------------------------------------------------
-# ABA 4 — PCA (em arquivo separado)
+# ABA 4 — PCA|ML
 # -----------------------------------------------------------------------------
 with tab4:
-    render_pca_tab_inline(
+    render_ann_tab(
         repo=repo,
         branch=branch,
         pick_existing_dir=pick_existing_dir,
         list_files=list_files,
         load_parquet=load_parquet,
         load_csv=load_csv,
+        load_gpkg=load_gpkg,
+        github_fetch_bytes=github_fetch_bytes,
+        make_geojson=make_geojson,
+        ensure_wgs84=ensure_wgs84,
+        hex_to_rgba=hex_to_rgba,
+        pick_categorical=pick_categorical,
+        render_geojson_layer=render_geojson_layer,
+        render_line_layer=render_line_layer,
+        render_point_layer=render_point_layer,
+        osm_basemap_deck=osm_basemap_deck,
+        deck=deck,
     )
+
+
 
 
 
