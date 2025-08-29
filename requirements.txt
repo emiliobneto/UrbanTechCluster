@@ -12,3 +12,6 @@ pyogrio>=0.9,<1.0
 shapely>=2.0,<3.0
 pyproj>=3.6,<4.0
 fiona>=1.9,<2.0
+kaleido>=0.2.1
+matplotlib>=3.8
+scikit-learn>=1.3
