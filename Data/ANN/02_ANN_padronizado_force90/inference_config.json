@@ -1,0 +1,41 @@
+{
+  "model_name": "ann_sem_geo",
+  "export_time": "2025-08-26T19:55:16.048229",
+  "framework": "tensorflow 2.10.0",
+  "python": "3.9.18",
+  "n_classes": 4,
+  "class_names": [
+    "0",
+    "1",
+    "2",
+    "3"
+  ],
+  "feature_columns": [
+    "densidade_hec",
+    "Startups",
+    "UsoeOcupacao_1",
+    "UsoeOcupacao_2",
+    "UsoeOcupacao_3",
+    "UsoeOcupacao_4",
+    "UsoeOcupacao_5",
+    "UsoeOcupacao_6",
+    "UsoeOcupacao_7",
+    "UsoeOcupacao_8",
+    "UsoeOcupacao_9",
+    "UsoeOcupacao_10",
+    "EconomiaUrbana_1",
+    "EconomiaUrbana_2",
+    "EconomiaUrbana_3",
+    "Inovacao",
+    "MobilidadeUrbana_1",
+    "MobilidadeUrbana_2",
+    "MobilidadeUrbana_3",
+    "MobilidadeUrbana_4",
+    "MobilidadeUrbana_5",
+    "MobilidadeUrbana_6",
+    "MobilidadeUrbana_7"
+  ],
+  "target_column": "EstagioClusterizacao",
+  "apply_saved_scaler": true,
+  "notes": "Usar predict_ann com apply_saved_scaler=True para reproduzir pré-processamento."
+}
