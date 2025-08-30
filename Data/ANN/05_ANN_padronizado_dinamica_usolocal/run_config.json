@@ -1,0 +1,13 @@
+{
+  "selected_columns": [
+    "densidade_hec",
+    "Startups",
+    "Usolocal",
+    "DinamicaOcupacao",
+    "EconomiaUrbana",
+    "Inovacao",
+    "MobilidadeUrbana"
+  ],
+  "target_column": "EstagioClusterizacao",
+  "seed": 42
+}
