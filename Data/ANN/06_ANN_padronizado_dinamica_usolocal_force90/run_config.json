@@ -1,0 +1,31 @@
+{
+  "selected_columns": [
+    "densidade_hec",
+    "Startups",
+    "EconomiaUrbana_1",
+    "EconomiaUrbana_2",
+    "EconomiaUrbana_3",
+    "Inovacao",
+    "MobilidadeUrbana_1",
+    "MobilidadeUrbana_2",
+    "MobilidadeUrbana_3",
+    "MobilidadeUrbana_4",
+    "MobilidadeUrbana_5",
+    "MobilidadeUrbana_6",
+    "MobilidadeUrbana_7",
+    "Usolocal_1",
+    "Usolocal_2",
+    "Usolocal_3",
+    "Usolocal_4",
+    "Usolocal_5",
+    "Usolocal_6",
+    "DinamicaOcupacao_1",
+    "DinamicaOcupacao_2",
+    "DinamicaOcupacao_3",
+    "DinamicaOcupacao_4",
+    "DinamicaOcupacao_5",
+    "DinamicaOcupacao_6"
+  ],
+  "target_column": "EstagioClusterizacao",
+  "seed": 42
+}
