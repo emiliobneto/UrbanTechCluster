@@ -1,0 +1,25 @@
+{
+  "model_name": "ann_sem_geo",
+  "export_time": "2025-08-26T21:56:50.891916",
+  "framework": "tensorflow 2.10.0",
+  "python": "3.9.18",
+  "n_classes": 4,
+  "class_names": [
+    "0",
+    "1",
+    "2",
+    "3"
+  ],
+  "feature_columns": [
+    "densidade_hec",
+    "Startups",
+    "Usolocal",
+    "DinamicaOcupacao",
+    "EconomiaUrbana",
+    "Inovacao",
+    "MobilidadeUrbana"
+  ],
+  "target_column": "EstagioClusterizacao",
+  "apply_saved_scaler": true,
+  "notes": "Usar predict_ann com apply_saved_scaler=True para reproduzir pré-processamento."
+}
