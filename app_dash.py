@@ -979,6 +979,68 @@ def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parq
 
 # --------------------------- Função principal -----------------------------------------
 
+# ==========================
+# PATCH — Aba 4 (ANN) com seletor de pasta em Data/ANN
+# ==========================
+
+def _load_if_exists_in(repo, branch, list_files, load_csv, base_dir: str, filename_globs: list[str]):
+    """
+    Igual ao _load_if_exists original, mas RECEBE explicitamente o base_dir
+    (ex.: Data/ANN/04_ANN_sem_padronizacao_force90).
+    """
+    files = list_files(repo, base_dir, branch, exts=(".csv", ".txt", ".json", ".parquet"))
+
+    # 1) nome exato
+    for pat in filename_globs:
+        for f in files:
+            if _norm_text(f["name"]) == _norm_text(pat):
+                p = f["path"]
+                if p.lower().endswith(".parquet"):
+                    try:
+                        return load_parquet(repo, p, branch)
+                    except Exception:
+                        return None
+                if p.lower().endswith(".csv"):
+                    return load_csv(repo, p, branch)
+                if p.lower().endswith(".txt"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw__": [b.decode("utf-8", errors="replace")]})
+                    except Exception:
+                        return None
+                if p.lower().endswith(".json"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw_json__": [json.loads(b.decode("utf-8", errors="replace"))]})
+                    except Exception:
+                        return None
+    # 2) contains
+    for pat in filename_globs:
+        for f in files:
+            if _norm_text(pat) in _norm_text(f["name"]):
+                p = f["path"]
+                if p.lower().endswith(".parquet"):
+                    try:
+                        return load_parquet(repo, p, branch)
+                    except Exception:
+                        return None
+                if p.lower().endswith(".csv"):
+                    return load_csv(repo, p, branch)
+                if p.lower().endswith(".txt"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw__": [b.decode("utf-8", errors="replace")]})
+                    except Exception:
+                        return None
+                if p.lower().endswith(".json"):
+                    try:
+                        b = github_fetch_bytes(repo, p, branch)
+                        return pd.DataFrame({"__raw_json__": [json.loads(b.decode("utf-8", errors="replace"))]})
+                    except Exception:
+                        return None
+    return None
+
+
 def render_ann_tab(
     *,
     repo,
@@ -1000,17 +1062,30 @@ def render_ann_tab(
     osm_basemap_deck,
     deck,
 ):
-    """Renderiza toda a **Aba 4 — ANN** lendo de `Data/ANN`.
-
-    Se algum arquivo não existir, a seção correspondente mostra um aviso e segue.
-    """
-
+    """Renderiza toda a **Aba 4 — ANN** lendo de `Data/ANN/<EXECUCAO>` escolhido na UI."""
     st.subheader("🧠 Rede Neural — Métricas e Resultados (Data/ANN)")
-    ann_dir = _pick_dir_ann(repo, branch, pick_existing_dir)
-    st.caption(f"Diretório base: `{ann_dir}`")
+
+    # ---------------- Seletor de pasta de execução dentro de Data/ANN ----------------
+    ann_root = pick_existing_dir(repo, branch, ["Data/ANN", "data/ANN", "data/ann", "Data/Ann", "ANN"])
+    try:
+        items = github_listdir(repo, ann_root, branch)
+        run_dirs = [it["name"] for it in items if isinstance(it, dict) and it.get("type") == "dir"]
+    except Exception:
+        run_dirs = []
+    if not run_dirs:
+        st.warning(f"Não encontrei subpastas dentro de `{ann_root}`. Usando o próprio diretório.")
+    run_sel = st.selectbox(
+        "📁 Execução (pasta dentro de Data/ANN)",
+        options=(["(raiz)"] + run_dirs) if run_dirs else ["(raiz)"],
+        index=0,
+        key="ann_run_dir",
+        help="Escolha a pasta da execução (ex.: 04_ANN_sem_padronizacao_force90).",
+    )
+    ann_base = ann_root if run_sel == "(raiz)" else f"{ann_root}/{run_sel}"
+    st.caption(f"Lendo arquivos de: `{ann_base}`")
 
     # ==================================================================================
-    # 1) Histórico por época (val_metrics_per_epoch.csv / keras_history.csv / metrics_over_epochs.csv)
+    # 1) Histórico por época
     # ==================================================================================
     st.markdown("### 📈 Evolução por época")
     history_candidates = [
@@ -1018,10 +1093,9 @@ def render_ann_tab(
         "metrics_over_epochs.csv",
         "keras_history.csv",
     ]
-
     any_history = False
     for name in history_candidates:
-        df_hist = _load_if_exists(repo, branch, list_files, load_csv, [name])
+        df_hist = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, [name])
         if isinstance(df_hist, pd.DataFrame) and not df_hist.empty and "__raw__" not in df_hist.columns:
             any_history = True
             st.markdown(f"**Arquivo:** `{name}`")
@@ -1031,7 +1105,6 @@ def render_ann_tab(
             else:
                 for m in metric_cols:
                     ycols = [m]
-                    # tenta achar versão 'val_' da mesma métrica
                     for alt in [f"val_{m}", f"val-{m}", f"val{m}"]:
                         if alt in df_hist.columns:
                             ycols.append(alt)
@@ -1046,13 +1119,13 @@ def render_ann_tab(
                     st.plotly_chart(fig, use_container_width=True)
             st.divider()
     if not any_history:
-        st.info("Não encontrei arquivos de histórico por época em Data/ANN.")
+        st.info("Não encontrei arquivos de histórico por época nesta execução.")
 
     # ==================================================================================
-    # 2) AUC por classe (auc_summary.csv)
+    # 2) AUC por classe
     # ==================================================================================
     st.markdown("### 📊 AUC por classe")
-    df_auc = _load_if_exists(repo, branch, list_files, load_csv, ["auc_summary.csv", "roc_auc.csv"]) 
+    df_auc = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, ["auc_summary.csv", "roc_auc.csv"])
     if isinstance(df_auc, pd.DataFrame) and not df_auc.empty and "__raw__" not in df_auc.columns:
         cols = {c.lower(): c for c in df_auc.columns}
         class_col = cols.get("class") or cols.get("label") or cols.get("classe") or list(df_auc.columns)[0]
@@ -1061,16 +1134,17 @@ def render_ann_tab(
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(df_auc, use_container_width=True)
     else:
-        st.info("auc_summary.csv não encontrado.")
+        st.info("auc_summary.csv não encontrado nesta execução.")
 
     # ==================================================================================
-    # 3) Classification report (classification_report.txt)
+    # 3) Classification report
     # ==================================================================================
     st.markdown("### 🧾 Classification report")
-    df_cr_raw = _load_if_exists(repo, branch, list_files, load_csv, ["classification_report.txt", "classification_report.json"])
+    df_cr_raw = _load_if_exists_in(
+        repo, branch, list_files, load_csv, ann_base, ["classification_report.txt", "classification_report.json"]
+    )
     if isinstance(df_cr_raw, pd.DataFrame) and not df_cr_raw.empty:
         if "__raw_json__" in df_cr_raw.columns:
-            # já veio como JSON -> vira tabela
             data = df_cr_raw["__raw_json__"].iloc[0]
             try:
                 df_cr = pd.DataFrame(data).T.reset_index().rename(columns={"index": "label"})
@@ -1089,13 +1163,13 @@ def render_ann_tab(
         else:
             st.info("Não consegui extrair a tabela do classification_report.")
     else:
-        st.info("classification_report.txt não encontrado.")
+        st.info("classification_report (txt/json) não encontrado nesta execução.")
 
     # ==================================================================================
-    # 4) Testes de hipótese (hypothesis_tests.csv)
+    # 4) Testes de hipótese
     # ==================================================================================
     st.markdown("### 🧪 Testes de hipótese")
-    df_ht = _load_if_exists(repo, branch, list_files, load_csv, ["hypothesis_tests.csv"]) 
+    df_ht = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, ["hypothesis_tests.csv"])
     if isinstance(df_ht, pd.DataFrame) and not df_ht.empty and "__raw__" not in df_ht.columns:
         cols = {c.lower(): c for c in df_ht.columns}
         name_col = cols.get("metric") or cols.get("name") or cols.get("teste") or list(df_ht.columns)[0]
@@ -1107,31 +1181,31 @@ def render_ann_tab(
             st.plotly_chart(fig, use_container_width=True)
         st.dataframe(df_ht, use_container_width=True)
     else:
-        st.info("hypothesis_tests.csv não encontrado.")
+        st.info("hypothesis_tests.csv não encontrado nesta execução.")
 
     # ==================================================================================
-    # 5) Resumo de métricas (metrics_summary.csv)
+    # 5) Resumo de métricas
     # ==================================================================================
     st.markdown("### 🧮 Resumo de métricas")
-    df_ms = _load_if_exists(repo, branch, list_files, load_csv, ["metrics_summary.csv"]) 
+    df_ms = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, ["metrics_summary.csv"])
     if isinstance(df_ms, pd.DataFrame) and not df_ms.empty and "__raw__" not in df_ms.columns:
         st.dataframe(df_ms, use_container_width=True)
-        # tenta plotar todas as colunas numéricas por linha
         num_cols = [c for c in df_ms.columns if pd.api.types.is_numeric_dtype(df_ms[c])]
         if len(num_cols) >= 1:
-            melted = df_ms.melt(id_vars=[c for c in df_ms.columns if c not in num_cols], value_vars=num_cols, var_name="metric", value_name="value")
+            melted = df_ms.melt(id_vars=[c for c in df_ms.columns if c not in num_cols],
+                                value_vars=num_cols, var_name="metric", value_name="value")
             if "metric" in melted.columns and "value" in melted.columns:
                 fig = px.bar(melted, x="metric", y="value", title="Métricas (agregadas)")
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("metrics_summary.csv não encontrado.")
+        st.info("metrics_summary.csv não encontrado nesta execução.")
 
     # ==================================================================================
-    # 6) Configs e scaler (inference_config.json / run_config.json / scaler_params.json)
+    # 6) Configs e scaler
     # ==================================================================================
     st.markdown("### ⚙️ Configurações e scaler")
     for fname in ["inference_config.json", "run_config.json", "scaler_params.json"]:
-        df_cfg = _load_if_exists(repo, branch, list_files, load_csv, [fname])
+        df_cfg = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, [fname])
         if isinstance(df_cfg, pd.DataFrame) and not df_cfg.empty and "__raw_json__" in df_cfg.columns:
             st.markdown(f"**{fname}**")
             st.json(df_cfg["__raw_json__"].iloc[0])
@@ -1139,181 +1213,132 @@ def render_ann_tab(
                 params = df_cfg["__raw_json__"].iloc[0]
                 for key in ["mean_", "scale_"]:
                     if key in params and isinstance(params[key], (list, tuple)) and len(params[key]) > 0:
-                        dfp = pd.DataFrame({"feature": list(range(len(params[key]))), key: params[key]})
-                        fig = px.bar(dfp, x="feature", y=key, title=f"Scaler: {key}")
+                        dfp_ = pd.DataFrame({"feature": list(range(len(params[key]))), key: params[key]})
+                        fig = px.bar(dfp_, x="feature", y=key, title=f"Scaler: {key}")
                         st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info(f"{fname} não encontrado.")
+            st.info(f"{fname} não encontrado nesta execução.")
 
     # ==================================================================================
-    # 7) Mapas lado a lado (df25_com_previsoes.*): Estágio vs Predicted class
+    # 7) Mapas lado a lado — Estágio vs Predicted (usa df25_com_previsoes.csv da execução)
     # ==================================================================================
     st.markdown("### 🗺️ Mapas — Estágio de clusterização × Predicted class")
+    df_pred = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, ["df25_com_previsoes.csv"])
+    if isinstance(df_pred, pd.DataFrame) and not df_pred.empty and "__raw__" not in df_pred.columns:
+        # Detecta colunas
+        cols = list(df_pred.columns)
+        cols_norm = {_norm_text(c): c for c in cols}
+        # SQ
+        sq_col = next((c for c in cols if _norm_text(c) in {"sq"}), None)
+        if sq_col is None:
+            sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
+        # Estágio de clusterização
+        est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
+        if est_col is None:
+            est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
+        # Predicted class
+        pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
+        if pred_col is None:
+            pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
 
-    # 7.1 — Seleção da subpasta em Data/ANN
-    ann_base = _pick_dir_ann(repo, branch, pick_existing_dir)  # ex.: Data/ANN
-    try:
-        ann_entries = github_listdir(repo, ann_base, branch)  # lista conteúdo (dirs/arquivos)
-        ann_folders = [e["name"] for e in ann_entries
-                       if isinstance(e, dict) and e.get("type") == "dir"]
-    except Exception:
-        ann_folders = []
-    if not ann_folders:
-        st.info("Nenhuma subpasta encontrada em `Data/ANN`.")
-        return
+        if not sq_col:
+            st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.csv.")
+            return
+        if not est_col or not pred_col:
+            st.warning("Não encontrei 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview.")
+            st.dataframe(df_pred.head(), use_container_width=True)
+            return
 
-    exp_sel = st.selectbox("Experimento (subpasta de Data/ANN)", ann_folders, index=0, key="ann_item7_dir")
-    exp_dir = f"{ann_base.rstrip('/')}/{exp_sel}"
+        # --- quadras com proteção + cache de sessão ---
+        gdf_quadras = st.session_state.get("gdf_quadras_cached")
+        if gdf_quadras is None or gdf_quadras.empty:
+            try:
+                gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
+                st.session_state["gdf_quadras_cached"] = gdf_quadras
+            except Exception as e:
+                st.error(f"Falha carregando quadras.gpkg: {e}")
+                return
 
-    # 7.2 — Localiza df25_com_previsoes.* dentro da pasta escolhida
-    files_here = list_files(repo, exp_dir, branch, exts=(".csv", ".parquet"))
-    def _match_df25(nm: str) -> bool:
-        s = nm.lower()
-        return ("df25" in s) and ("previs" in s)  # casa df25_com_previsoes.*
-    hit = next((f for f in files_here if _match_df25(f["name"])), None)
+        geom_name = gdf_quadras.geometry.name
+        sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
+        if not sq_geo_col:
+            st.error("A camada de quadras não possui coluna 'SQ'.")
+            return
 
-    if not hit:
-        st.warning("Não encontrei `df25_com_previsoes.(csv|parquet)` na pasta selecionada.")
-        return
+        # --- NORMALIZAÇÃO DO JOIN (evita erro de tipos) ---
+        import re as _re
+        def _norm_sq_6(x):
+            s = _re.sub(r"\D", "", str(x)) if x is not None else ""
+            if s == "": return None
+            if len(s) > 6: s = s[-6:]
+            return s.zfill(6)
 
-    df25_path = hit["path"]
-    df_pred = (
-        load_parquet(repo, df25_path, branch)
-        if df25_path.lower().endswith(".parquet")
-        else load_csv(repo, df25_path, branch)
-    )
-    if not isinstance(df_pred, pd.DataFrame) or df_pred.empty:
-        st.warning("Arquivo de previsões vazio ou inválido.")
-        return
+        dfp = df_pred[[sq_col, est_col, pred_col]].copy()
+        dfp.columns = ["SQ_raw", "estagio", "predicted"]
+        dfp["_SQ_norm"] = dfp["SQ_raw"].apply(_norm_sq_6)
 
-    # 7.3 — Detecta colunas relevantes
-    cols = list(df_pred.columns)
-    cols_norm = {_norm_text(c): c for c in cols}
+        gdf_tmp = gdf_quadras[[sq_geo_col, geom_name]].copy()
+        gdf_tmp["_SQ_norm"] = gdf_tmp[sq_geo_col].apply(_norm_sq_6)
 
-    # SQ
-    sq_col = next((c for c in cols if _norm_text(c) == "sq"), None)
-    if sq_col is None:
-        sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
+        gdf = gdf_tmp.merge(dfp[["_SQ_norm", "estagio", "predicted"]], on="_SQ_norm", how="left")
+        gdf = ensure_wgs84(gdf)
 
-    # Estágio de clusterização
-    est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
-    if est_col is None:
-        est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
+        # Paletas
+        cmap_est = {str(v): c for v, c in zip(sorted(gdf["estagio"].dropna().astype(str).unique()), pick_categorical(len(gdf["estagio"].dropna().astype(str).unique())))}
+        cmap_pred = {str(v): c for v, c in zip(sorted(gdf["predicted"].dropna().astype(str).unique()), pick_categorical(len(gdf["predicted"].dropna().astype(str).unique())))}
 
-    # Predicted class
-    pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
-    if pred_col is None:
-        pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
+        # GeoJSONs com cores
+        def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
+            gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
+            for feat in gj.get("features", []):
+                v = feat.get("properties", {}).get(value_col, None)
+                hexc = cmap.get(str(v), "#999999")
+                feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+            return gj
 
-    if not sq_col:
-        st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.")
-        return
-    if not est_col or not pred_col:
-        st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
-        st.dataframe(df_pred.head(), use_container_width=True)
-        return
+        gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
+        gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
 
-    # 7.4 — Carrega quadras com cache
-    gdf_quadras = st.session_state.get("gdf_quadras_cached")
-    if gdf_quadras is None or gdf_quadras.empty:
-        try:
-            gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
-            st.session_state["gdf_quadras_cached"] = gdf_quadras
-        except Exception as e:
-            st.error(f"Falha carregando quadras.gpkg: {e}")
-            return  # encerra só a aba 4
+        base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
 
-    geom_name = gdf_quadras.geometry.name
-    sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
-    if not sq_geo_col:
-        st.error("A camada de quadras não possui coluna 'SQ'.")
-        return
-
-    # 7.5 — Normalização robusta da chave (evita ValueError no merge)
-    import re as _re
-    def _digits(s):
-        return _re.sub(r"\D", "", "" if s is None else str(s))
-
-    pred_digits = df_pred[sq_col].astype("string").map(_digits)
-    quad_digits = gdf_quadras[sq_geo_col].astype("string").map(_digits)
-    width = max(int(pred_digits.str.len().max() or 0), int(quad_digits.str.len().max() or 0))
-    width = width if width > 0 else 6
-
-    dfp = df_pred[[sq_col, est_col, pred_col]].copy()
-    dfp.columns = ["SQ_raw", "estagio", "predicted"]
-    dfp["__sq_norm__"] = dfp["SQ_raw"].astype("string").map(_digits).str.zfill(width)
-
-    gq = gdf_quadras[[sq_geo_col, geom_name]].copy()
-    gq["__sq_norm__"] = gq[sq_geo_col].astype("string").map(_digits).str.zfill(width)
-
-    # 7.6 — Merge seguro e CRS
-    gdf = gq.merge(dfp[["__sq_norm__", "estagio", "predicted"]], on="__sq_norm__", how="left")
-    gdf = ensure_wgs84(gdf)
-
-    # 7.7 — Paletas e GeoJSONs
-    cmap_est = _cat_palette_from_values(gdf["estagio"], pick_categorical)
-    cmap_pred = _cat_palette_from_values(gdf["predicted"], pick_categorical)
-
-    def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
-        gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
-        for feat in gj.get("features", []):
-            v = feat.get("properties", {}).get(value_col, None)
-            hexc = cmap.get(str(v), "#999999")
-            feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
-        return gj
-
-    gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
-    gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
-
-    # 7.8 — Plano de fundo e mapas
-    base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
-
-    c1, c2 = st.columns(2, gap="large")
-    with c1:
-        st.markdown("**Estágio de clusterização**")
-        lyr = render_geojson_layer(gj_est, name="estagio")
-        deck([lyr], satellite=True) if base.startswith("Satélite") else osm_basemap_deck([lyr])
-        st.markdown("**Legenda — Estágio**")
-        for k, hexc in cmap_est.items():
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                f"<span>{k}</span></div>", unsafe_allow_html=True
-            )
-    with c2:
-        st.markdown("**Predicted class**")
-        lyr = render_geojson_layer(gj_pred, name="predicted")
-        deck([lyr], satellite=True) if base.startswith("Satélite") else osm_basemap_deck([lyr])
-        st.markdown("**Legenda — Predicted**")
-        for k, hexc in cmap_pred.items():
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                f"<span>{k}</span></div>", unsafe_allow_html=True
-            )
-
-    # (opcional) diagnóstico do join
-    with st.expander("🔎 Debug — Join SQ (item 7)"):
-        total_quad = int(len(gq))
-        com_match = int(gdf["estagio"].notna().sum())
-        st.write({"exp_dir": exp_dir, "arquivo": df25_path, "quadras_total": total_quad,
-                  "quadras_com_match": com_match, "width_zfill": width})
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            st.markdown("**Estágio de clusterização**")
+            lyr = render_geojson_layer(gj_est, name="estagio")
+            (deck if base.startswith("Satélite") else osm_basemap_deck)([lyr], satellite=base.startswith("Satélite"))
+            st.markdown("**Legenda — Estágio**")
+            for k, hexc in cmap_est.items():
+                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("**Predicted class**")
+            lyr = render_geojson_layer(gj_pred, name="predicted")
+            (deck if base.startswith("Satélite") else osm_basemap_deck)([lyr], satellite=base.startswith("Satélite"))
+            st.markdown("**Legenda — Predicted**")
+            for k, hexc in cmap_pred.items():
+                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+    else:
+        st.info("df25_com_previsoes.csv não encontrado nesta execução.")
 
     # ==================================================================================
-    # 8) (Opcional) Distribuições de score / matriz de confusão se existir 'test_predictions_with_meta.csv'
+    # 8) Extras — distribuições e matriz de confusão
     # ==================================================================================
     with st.expander("Extras — distribuições e matriz de confusão"):
-        df_meta = _load_if_exists(repo, branch, list_files, load_csv, ["test_predictions_with_meta.csv"]) 
+        df_meta = _load_if_exists_in(
+            repo, branch, list_files, load_csv, ann_base,
+            ["test_predictions_with_meta.csv", "predictions_df25_with_meta.csv"]
+        )
         if isinstance(df_meta, pd.DataFrame) and not df_meta.empty and "__raw__" not in df_meta.columns:
             cols = {c.lower(): c for c in df_meta.columns}
             y_true = cols.get("y_true") or cols.get("true") or cols.get("label")
             y_pred = cols.get("y_pred") or cols.get("pred") or cols.get("predicted")
             prob_cols = [c for c in df_meta.columns if c.lower().startswith("prob_")]
             if y_true and y_pred:
-                # matriz de confusão
                 try:
                     from sklearn.metrics import confusion_matrix
-                    import itertools
                     labels = sorted(pd.unique(pd.concat([df_meta[y_true], df_meta[y_pred]]).astype(str)))
                     cm = confusion_matrix(df_meta[y_true].astype(str), df_meta[y_pred].astype(str), labels=labels)
                     df_cm = pd.DataFrame(cm, index=labels, columns=labels)
@@ -1326,8 +1351,7 @@ def render_ann_tab(
                 fig = px.histogram(mlong, x="prob", facet_col="classe", nbins=30, title="Distribuição de probabilidades")
                 st.plotly_chart(fig, use_container_width=True)
         else:
-            st.caption("Arquivo test_predictions_with_meta.csv ausente — ignorando extras.")
-
+            st.caption("Arquivo de predições com meta ausente — ignorando extras.")
 
 # ==========================
 # SIDEBAR — Repositório e Mapbox
@@ -2826,6 +2850,7 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
 
