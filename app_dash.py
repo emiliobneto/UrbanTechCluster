@@ -1361,27 +1361,87 @@ def render_ann_tab(
         gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
         gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
 
-        base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
-
+        # Plano de fundo
+        base = st.radio(
+            "Plano de fundo",
+            ["OpenStreetMap", "Satélite (Mapbox)"],
+            index=0,
+            horizontal=True,
+            key="ann_maps_base",
+        )
+        
         c1, c2 = st.columns(2, gap="large")
+        
         with c1:
             st.markdown("**Estágio de clusterização**")
-            lyr = render_geojson_layer(gj_est, name="estagio")
-            (deck if base.startswith("Satélite") else osm_basemap_deck)([lyr], satellite=base.startswith("Satélite"))
+            lyr_est = render_geojson_layer(gj_est, name="estagio")
+            if base.startswith("Satélite"):
+                deck([lyr_est], satellite=True)              # <- CORRETO: deck aceita 'satellite'
+            else:
+                osm_basemap_deck([lyr_est])                  # <- CORRETO: sem parâmetro 'satellite'
             st.markdown("**Legenda — Estágio**")
             for k, hexc in cmap_est.items():
-                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                    f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                    f"<span>{k}</span></div>",
+                    unsafe_allow_html=True,
+                )
+        
         with c2:
             st.markdown("**Predicted class**")
-            lyr = render_geojson_layer(gj_pred, name="predicted")
-            (deck if base.startswith("Satélite") else osm_basemap_deck)([lyr], satellite=base.startswith("Satélite"))
+            lyr_pred = render_geojson_layer(gj_pred, name="predicted")
+            if base.startswith("Satélite"):
+                deck([lyr_pred], satellite=True)
+            else:
+                osm_basemap_deck([lyr_pred])
             st.markdown("**Legenda — Predicted**")
             for k, hexc in cmap_pred.items():
-                st.markdown(f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                            f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                            f"<span>{k}</span></div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                    f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                    f"<span>{k}</span></div>",
+                    unsafe_allow_html=True,
+                )
+        
+        # =========================
+        # Resumos após os "gráficos"
+        # =========================
+        st.markdown("#### 📋 Resumo — cobertura e frequências")
+        
+        # Cobertura do join (usa pelo menos uma das colunas não nulas)
+        total_quadras = int(len(gdf_quadras))
+        com_join = int(((gdf["estagio"].notna()) | (gdf["predicted"].notna())).sum())
+        sem_join = total_quadras - com_join
+        df_cobertura = pd.DataFrame(
+            {
+                "Métrica": ["Total de quadras", "SQ com match (join)", "SQ sem match"],
+                "Valor": [total_quadras, com_join, sem_join],
+            }
+        )
+        st.dataframe(df_cobertura, use_container_width=True)
+        download_df(df_cobertura, "resumo_cobertura_mapas_ann")
+        
+        # Frequências por categoria (inclui NaN como categoria)
+        freq_est = (
+            gdf["estagio"].astype("string").fillna("(NaN)").value_counts(dropna=False)
+            .rename_axis("estagio").reset_index(name="n")
+        )
+        freq_pred = (
+            gdf["predicted"].astype("string").fillna("(NaN)").value_counts(dropna=False)
+            .rename_axis("predicted").reset_index(name="n")
+        )
+        
+        col_fe1, col_fe2 = st.columns(2, gap="large")
+        with col_fe1:
+            st.markdown("**Frequências — Estágio**")
+            st.dataframe(freq_est, use_container_width=True)
+            download_df(freq_est, "frequencias_estagio_ann")
+        with col_fe2:
+            st.markdown("**Frequências — Predicted**")
+            st.dataframe(freq_pred, use_container_width=True)
+            download_df(freq_pred, "frequencias_predicted_ann")
+
     else:
         st.info("df25_com_previsoes.csv não encontrado nesta execução.")
 
@@ -2912,6 +2972,7 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
 
