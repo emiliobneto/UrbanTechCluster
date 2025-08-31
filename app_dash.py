@@ -197,10 +197,9 @@ def load_parquet(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=True)
-def load_csv(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
+def load_csv(owner_repo, path, branch) -> pd.DataFrame:
     blob = github_fetch_bytes(owner_repo, path, branch)
-    return pd.read_csv(io.BytesIO(blob))
-
+    return pd.read_csv(io.BytesIO(blob), usecols=lambda c: not str(c).startswith("Unnamed"))
 
 def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
     items = github_listdir(owner_repo, path, branch)
@@ -1594,8 +1593,8 @@ if not repo or not branch:
 # ==========================
 # TABS
 # ==========================
-TAB_LABELS = ["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA"]
-tab1, tab2, tab3, tab4 = st.tabs(TAB_LABELS)
+TAB_LABELS = ["🗺️ Principal", "🧬 Clusterização", "📊 Univariadas", "🧠 ML → PCA",  "🤖 Clusterizador"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(TAB_LABELS)
 
 
 # -----------------------------------------------------------------------------
@@ -3067,6 +3066,227 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
+# -----------------------------------------------------------------------------
+# ABA 5 — Clusterizador (Data/clusterizador)
+# -----------------------------------------------------------------------------
+with tab5:
+    st.subheader("🤖 Clusterizador — métricas e comparação")
+    st.caption("Lê pastas dentro de `Data/clusterizador` e mostra métricas/tabelas dos experimentos.")
+
+    # ------ helpers locais da aba 5 (chaves únicas prefixadas t5_) ------
+    def _list_subdirs(owner_repo: str, base_dir: str, branch: str) -> list[str]:
+        try:
+            items = github_listdir(owner_repo, base_dir, branch)
+            return [it["name"] for it in items if isinstance(it, dict) and it.get("type") == "dir"]
+        except Exception:
+            return []
+
+    def _csv_if_exists(path: str):
+        try:
+            return load_csv(repo, path, branch)
+        except Exception:
+            return None
+
+    def _parquet_if_exists(path: str):
+        try:
+            return load_parquet(repo, path, branch)
+        except Exception:
+            return None
+
+    # ------ base/descoberta de diretório ------
+    base_cluster = pick_existing_dir(
+        repo, branch,
+        ["Data/clusterizador", "data/clusterizador", "Data/Clusterizador"]
+    )
+    st.caption(f"Diretório base: `{base_cluster}`")
+
+    subdirs_all = _list_subdirs(repo, base_cluster, branch)
+    if not subdirs_all:
+        st.error("Nenhuma pasta encontrada em `Data/clusterizador`.")
+        st.stop()
+
+    # Por padrão, usa as 5 primeiras pastas (como nas figuras) para seleção única
+    default_5 = subdirs_all[:5]
+    colL, colR = st.columns([1.4, 1])
+    with colL:
+        sel_dir = st.selectbox("Pasta de teste", default_5 if default_5 else subdirs_all,
+                               index=0, key="t5_sel_dir")
+    with colR:
+        compare_all = st.toggle("Comparar todas as pastas", value=False, key="t5_compare_all")
+
+    # ------------------------- modo: pasta única -------------------------
+    def _render_single(folder_name: str):
+        st.markdown(f"### 📁 {folder_name}")
+        folder_path = f"{base_cluster}/{folder_name}"
+
+        # 1) Métricas de todos os modelos
+        df_met = _csv_if_exists(f"{folder_path}/metricas_todos_modelos.csv")
+        if isinstance(df_met, pd.DataFrame) and not df_met.empty:
+            st.markdown("#### 📊 Métricas — todos os modelos")
+            st.dataframe(df_met, use_container_width=True)
+            download_df(df_met, f"metricas_todos_modelos_{folder_name}")
+
+            # Detecta coluna do modelo/algoritmo
+            cols = {c.lower(): c for c in df_met.columns}
+            model_col = cols.get("modelo") or cols.get("model") or cols.get("algoritmo") or list(df_met.columns)[0]
+            # Numéricas
+            num_cols = [c for c in df_met.columns if pd.api.types.is_numeric_dtype(df_met[c])]
+            # Gráficos para as métricas mais comuns
+            metric_like_max = [c for c in num_cols if any(k in c.lower() for k in
+                                ["silhouette", "calinski", "ari", "nmi", "accuracy", "purity"])]
+            metric_like_min = [c for c in num_cols if any(k in c.lower() for k in
+                                ["davies", "db", "inertia"])]
+
+            for mc in metric_like_max[:6]:
+                fig = px.bar(df_met, x=model_col, y=mc, title=f"{mc} (quanto maior, melhor)")
+                st.plotly_chart(fig, use_container_width=True)
+            for mc in metric_like_min[:3]:
+                fig = px.bar(df_met, x=model_col, y=mc, title=f"{mc} (quanto menor, melhor)")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Resumo (ranking simples)
+            df_sum = df_met[[model_col] + metric_like_max + metric_like_min].copy()
+            for c in metric_like_max:
+                df_sum[f"rank_{c}"] = df_sum[c].rank(ascending=False, method="min")
+            for c in metric_like_min:
+                df_sum[f"rank_{c}"] = df_sum[c].rank(ascending=True, method="min")
+            rank_cols = [c for c in df_sum.columns if c.startswith("rank_")]
+            if rank_cols:
+                df_sum["rank_medio"] = df_sum[rank_cols].mean(axis=1)
+                df_rank = df_sum[[model_col, "rank_medio"] + rank_cols].sort_values("rank_medio")
+                st.markdown("#### 🧾 Resumo — ranking médio por modelo")
+                st.dataframe(df_rank, use_container_width=True)
+                download_df(df_rank, f"resumo_ranking_{folder_name}")
+
+        else:
+            st.info("`metricas_todos_modelos.csv` não encontrado nesta pasta.")
+
+        st.divider()
+
+        # 2) Comparação de acurácia (se existir)
+        df_acc = _csv_if_exists(f"{folder_path}/comparacao_acuracia.csv")
+        if isinstance(df_acc, pd.DataFrame) and not df_acc.empty:
+            st.markdown("#### 🎯 Comparação de acurácia")
+            st.dataframe(df_acc, use_container_width=True)
+            download_df(df_acc, f"comparacao_acuracia_{folder_name}")
+
+            # plota todas as colunas numéricas
+            cols = {c.lower(): c for c in df_acc.columns}
+            who = cols.get("modelo") or cols.get("model") or cols.get("algoritmo") or list(df_acc.columns)[0]
+            nums = [c for c in df_acc.columns if pd.api.types.is_numeric_dtype(df_acc[c])]
+            if nums:
+                mlong = df_acc.melt(id_vars=[who], value_vars=nums, var_name="métrica", value_name="valor")
+                fig = px.bar(mlong, x=who, y="valor", color="métrica", barmode="group",
+                             title="Acurácia / métricas por modelo")
+                st.plotly_chart(fig, use_container_width=True)
+
+        # 3) Importância de variáveis (RF/KMeans) – opcional
+        df_imp = _csv_if_exists(f"{folder_path}/importancia_rf_kmeans.csv")
+        if isinstance(df_imp, pd.DataFrame) and not df_imp.empty:
+            st.markdown("#### 🌟 Importância de variáveis (RF/KMeans)")
+            # detecta 'feature' e 'importance'
+            cols = {c.lower(): c for c in df_imp.columns}
+            feat = cols.get("feature") or cols.get("variavel") or cols.get("atributo") or list(df_imp.columns)[0]
+            imp  = cols.get("importance") or cols.get("importancia") or (list(df_imp.columns)[1] if len(df_imp.columns) > 1 else None)
+            if imp:
+                top = df_imp.sort_values(imp, ascending=False).head(20)
+                fig = px.bar(top.sort_values(imp), x=imp, y=feat, orientation="h", title="Top importâncias")
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(top, use_container_width=True)
+                download_df(top, f"importancias_top_{folder_name}")
+
+        # 4) Resumo de clusters KMeans (se existir)
+        df_cs = _csv_if_exists(f"{folder_path}/cluster_summary_kmeans.csv")
+        if isinstance(df_cs, pd.DataFrame) and not df_cs.empty:
+            st.markdown("#### 🧩 Resumo de clusters (KMeans)")
+            st.dataframe(df_cs, use_container_width=True)
+            download_df(df_cs, f"cluster_summary_kmeans_{folder_name}")
+
+            cols = {c.lower(): c for c in df_cs.columns}
+            c_cluster = cols.get("cluster") or cols.get("label") or list(df_cs.columns)[0]
+            c_count   = cols.get("n") or cols.get("count") or cols.get("tamanho") or cols.get("size")
+            if c_count:
+                fig = px.bar(df_cs, x=c_cluster, y=c_count, title="Tamanho dos clusters (KMeans)")
+                st.plotly_chart(fig, use_container_width=True)
+
+    if not compare_all:
+        _render_single(sel_dir)
+        st.stop()
+
+    # ------------------------- modo: comparar todas -------------------------
+    st.markdown("### 📊 Comparação entre pastas")
+
+    # Junta metricas_todos_modelos.csv de todas as pastas
+    frames = []
+    for d in subdirs_all:
+        df = _csv_if_exists(f"{base_cluster}/{d}/metricas_todos_modelos.csv")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            tmp = df.copy()
+            tmp["pasta"] = d
+            frames.append(tmp)
+    if not frames:
+        st.info("Nenhuma pasta possui `metricas_todos_modelos.csv` para comparação.")
+        st.stop()
+
+    df_all = pd.concat(frames, ignore_index=True)
+    st.dataframe(df_all, use_container_width=True)
+    download_df(df_all, "metricas_todos_modelos_todas_as_pastas")
+
+    # Coluna de modelo
+    cols = {c.lower(): c for c in df_all.columns}
+    model_col = cols.get("modelo") or cols.get("model") or cols.get("algoritmo") or "modelo"
+
+    # Detecta métricas numéricas
+    num_cols = [c for c in df_all.columns if pd.api.types.is_numeric_dtype(df_all[c])]
+    # Silhouette / Calinski / Davies principalmente
+    for mc in [c for c in num_cols if any(k in c.lower() for k in ["silhouette", "calinski", "davies"])][:6]:
+        fig = px.bar(
+            df_all, x="pasta", y=mc, color=model_col, barmode="group",
+            title=f"{mc} por pasta × modelo"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Resumo: melhor modelo por métrica/pasta + ranking médio entre pastas
+    metric_like_max = [c for c in num_cols if any(k in c.lower() for k in
+                        ["silhouette", "calinski", "ari", "nmi", "accuracy", "purity"])]
+    metric_like_min = [c for c in num_cols if any(k in c.lower() for k in
+                        ["davies", "db", "inertia"])]
+
+    # ranking dentro de cada pasta
+    group_cols = ["pasta", model_col]
+    df_rank_rows = []
+    for pasta, g in df_all.groupby("pasta"):
+        for c in metric_like_max:
+            if c in g:
+                r = g[[model_col, c]].assign(rank=g[c].rank(ascending=False, method="min"))
+                for _, row in r.iterrows():
+                    df_rank_rows.append({"pasta": pasta, "metric": c, model_col: row[model_col], "rank": row["rank"]})
+        for c in metric_like_min:
+            if c in g:
+                r = g[[model_col, c]].assign(rank=g[c].rank(ascending=True, method="min"))
+                for _, row in r.iterrows():
+                    df_rank_rows.append({"pasta": pasta, "metric": c, model_col: row[model_col], "rank": row["rank"]})
+    if df_rank_rows:
+        df_ranks = pd.DataFrame(df_rank_rows)
+        resumo = (
+            df_ranks.groupby(["metric", model_col])["rank"]
+            .mean()
+            .reset_index()
+            .rename(columns={"rank": "rank_medio_entre_pastas"})
+            .sort_values(["metric", "rank_medio_entre_pastas"])
+        )
+        st.markdown("#### 🧾 Tabela — ranking médio entre pastas")
+        st.dataframe(resumo, use_container_width=True)
+        download_df(resumo, "ranking_medio_entre_pastas")
+
+        # gráfico por métrica
+        for m in resumo["metric"].unique():
+            sub = resumo[resumo["metric"] == m]
+            fig = px.bar(sub.sort_values("rank_medio_entre_pastas"),
+                         x="rank_medio_entre_pastas", y=model_col, orientation="h",
+                         title=f"Ranking médio ({m}) — menor é melhor")
+            st.plotly_chart(fig, use_container_width=True)
 
 
 
