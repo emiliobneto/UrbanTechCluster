@@ -853,13 +853,13 @@ def _render_evr_section(df_evr: pd.DataFrame):
             title="Scree — Variância explicada por componente",
         )
         st.plotly_chart(fig, use_container_width=True)
-        download_plotly_png(fig, f"heatmap_{analise_tipo}")
+        download_plotly_png(fig,  "pca_evr_bar")
     with c2:
         fig2 = px.line(
             df, x="component", y="cumulative", markers=True, title="Variância explicada acumulada"
         )
         st.plotly_chart(fig2, use_container_width=True)
-        download_plotly_png(fig2, f"heatmap_{analise_tipo}")
+        download_plotly_png(fig2, "pca_evr_cumulative")
 
     st.subheader("Tabela — Variância explicada")
     st.dataframe(df, use_container_width=True)
@@ -1166,7 +1166,7 @@ def render_ann_tab(
         pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
         if pred_col is None:
             pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
-
+    
         if not sq_col:
             st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.csv.")
             return
@@ -1174,8 +1174,8 @@ def render_ann_tab(
             st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
             st.dataframe(df_pred.head(), use_container_width=True)
             return
-
-        # Carrega quadras (reuso do cache da Aba 1, se existir)
+    
+        # ---------------- ADIÇÃO: carregar quadras com proteção ----------------
         gdf_quadras = st.session_state.get("gdf_quadras_cached")
         if gdf_quadras is None or gdf_quadras.empty:
             try:
@@ -1183,7 +1183,10 @@ def render_ann_tab(
                 st.session_state["gdf_quadras_cached"] = gdf_quadras
             except Exception as e:
                 st.error(f"Falha carregando quadras.gpkg: {e}")
-                return
+                return   # encerra só a aba 4; as outras abas seguem
+        # ----------------------------------------------------------------------
+    
+        # (restante do código original da seção 7)
         geom_name = gdf_quadras.geometry.name
         sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
         if not sq_geo_col:
@@ -2637,9 +2640,18 @@ with tab3:
 # ABA 4 — PCA|ML
 # -----------------------------------------------------------------------------
 with tab4:
+    # (opcional) PCA prontos
+    render_pca_tab_inline(
+        repo, branch,
+        pick_existing_dir, list_files,
+        load_parquet, load_csv
+    )
+
+    st.divider()
+
+    # ANN (como já está)
     render_ann_tab(
-        repo=repo,
-        branch=branch,
+        repo=repo, branch=branch,
         pick_existing_dir=pick_existing_dir,
         list_files=list_files,
         load_parquet=load_parquet,
@@ -2656,6 +2668,7 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
 
