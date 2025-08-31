@@ -1145,77 +1145,134 @@ def render_ann_tab(
         else:
             st.info(f"{fname} não encontrado.")
 
-    # ==================================================================================
+        # ==================================================================================
     # 7) Mapas lado a lado (df25_com_previsoes.csv): Estágio vs Predicted class
+    # — agora com seleção de subpasta em Data/ANN
     # ==================================================================================
     st.markdown("### 🗺️ Mapas — Estágio de clusterização × Predicted class")
 
-    # 7.1) Carrega o arquivo com previsões
-    df_pred = _load_if_exists(repo, branch, list_files, load_csv, ["df25_com_previsoes.csv"])
-    if not (isinstance(df_pred, pd.DataFrame) and not df_pred.empty and "__raw__" not in df_pred.columns):
-        st.info("df25_com_previsoes.csv não encontrado ou vazio.")
+    # Base Data/ANN (auto, case-insensitive)
+    ann_base = _pick_dir_ann(repo, branch, pick_existing_dir)
+
+    # --- util: listar subpastas no GitHub ---
+    def _list_dirs(repo, base_dir, branch):
+        try:
+            items = github_listdir(repo, base_dir, branch)
+            return [it["name"] for it in items if isinstance(it, dict) and it.get("type") == "dir"]
+        except Exception:
+            return []
+
+    # --- util: procurar (recursivamente) um arquivo dentro da pasta escolhida ---
+    def _find_first_in_dir(repo, branch, base_dir, name_candidates):
+        # 1) tentativa direta na pasta
+        files_here = list_files(repo, base_dir, branch, exts=(".csv", ".parquet", ".json", ".txt"))
+        for nm in name_candidates:
+            for f in files_here:
+                if _norm_text(f["name"]) == _norm_text(nm):
+                    return f["path"]
+        # 2) varredura na árvore apenas sob base_dir
+        all_paths = github_tree_paths(repo, branch)  # cacheado
+        prefix = base_dir.strip("/").lower() + "/"
+        # (a) match por nome exato
+        for nm in name_candidates:
+            nm_low = _norm_text(nm)
+            cand = [p for p in all_paths if p.lower().startswith(prefix) and _norm_text(p.split("/")[-1]) == nm_low]
+            if cand:
+                cand.sort(key=len)  # pega o mais "próximo" da pasta
+                return cand[0]
+        # (b) match por "contém"
+        for nm in name_candidates:
+            nm_low = _norm_text(nm)
+            cand = [p for p in all_paths if p.lower().startswith(prefix) and nm_low in _norm_text(p.split("/")[-1])]
+            if cand:
+                cand.sort(key=len)
+                return cand[0]
+        return None
+
+    # Subpastas visíveis na imagem (01_ANN_padronizado, 02_..., etc.)
+    subdirs = _list_dirs(repo, ann_base, branch)
+    if subdirs:
+        sel_dir_name = st.selectbox("Experimento (pasta em Data/ANN)", subdirs, index=0, key="ann_dir_sel")
+        sel_dir = f"{ann_base.rstrip('/')}/{sel_dir_name}"
+    else:
+        st.info(f"Nenhuma subpasta encontrada em `{ann_base}`. Buscando o arquivo diretamente nessa pasta.")
+        sel_dir = ann_base
+
+    # Arquivo de previsões dentro da pasta selecionada
+    pred_path = _find_first_in_dir(
+        repo, branch, sel_dir,
+        ["df25_com_previsoes.csv", "df_com_previsoes.csv", "df25_com_previsoes.parquet"]
+    )
+    if not pred_path:
+        st.warning(f"Não encontrei `df25_com_previsoes.*` em `{sel_dir}`.")
+        # mostra o que existe ali para orientar
+        try:
+            prev = list_files(repo, sel_dir, branch, (".csv", ".parquet"))
+            if prev:
+                st.caption("Arquivos disponíveis na pasta selecionada:")
+                st.dataframe(pd.DataFrame(prev), use_container_width=True)
+        except Exception:
+            pass
         return
 
-    # 7.2) Descobre as colunas necessárias no df_pred
+    # Carrega o df de previsões
+    df_pred = load_parquet(repo, pred_path, branch) if pred_path.lower().endswith(".parquet") else load_csv(repo, pred_path, branch)
+    st.caption(f"Arquivo de previsões: `{pred_path}`")
+
+    if not (isinstance(df_pred, pd.DataFrame) and not df_pred.empty and "__raw__" not in df_pred.columns):
+        st.warning("O arquivo de previsões não é uma tabela válida.")
+        return
+
+    # ---------------- Detecta colunas ----------------
     cols = list(df_pred.columns)
     cols_norm = {_norm_text(c): c for c in cols}
-
     # SQ
     sq_col = next((c for c in cols if _norm_text(c) == "sq"), None)
     if sq_col is None:
         sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
-
     # Estágio de clusterização
     est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
     if est_col is None:
         est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
-
     # Predicted class
     pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
     if pred_col is None:
         pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
 
     if not sq_col:
-        st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.csv.")
+        st.error("Não encontrei a coluna 'SQ' (ou equivalente) no arquivo de previsões.")
         return
     if not est_col or not pred_col:
         st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
         st.dataframe(df_pred.head(), use_container_width=True)
         return
 
-    # 7.3) Carrega quadras com cache e proteção (NÃO derruba a aba em caso de erro)
+    # ---------------- Quadras (com cache) ----------------
     gdf_quadras = st.session_state.get("gdf_quadras_cached")
     if gdf_quadras is None or gdf_quadras.empty:
         try:
             gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
             st.session_state["gdf_quadras_cached"] = gdf_quadras
         except Exception as e:
-            st.error(f"Falha carregando 'Data/mapa/quadras.gpkg': {e}")
-            return  # encerra só a seção/aba, o app continua
+            st.error(f"Falha carregando quadras.gpkg: {e}")
+            return  # encerra só a aba 4
 
-    # 7.4) Verificações na camada de quadras
     geom_name = gdf_quadras.geometry.name
     sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
     if not sq_geo_col:
         st.error("A camada de quadras não possui coluna 'SQ'.")
         return
 
-    # 7.5) Merge (SQ, estágio, predicted) nas geometrias
+    # ---------------- Merge + paletas ----------------
     dfp = df_pred[[sq_col, est_col, pred_col]].copy()
     dfp.columns = ["SQ", "estagio", "predicted"]
     gdf = gdf_quadras[[sq_geo_col, geom_name]].merge(dfp, left_on=sq_geo_col, right_on="SQ", how="left")
     gdf = ensure_wgs84(gdf)
 
-    # 7.6) Paletas de cores (categóricas)
-    def _cat_palette_from_values(values, pick_categorical):
-        cats = [str(v) for v in pd.Series(values).dropna().unique().tolist()]
-        palette = pick_categorical(len(cats))
-        return {cats[i]: palette[i] for i in range(len(cats))}
-
     cmap_est = _cat_palette_from_values(gdf["estagio"], pick_categorical)
     cmap_pred = _cat_palette_from_values(gdf["predicted"], pick_categorical)
 
-    # 7.7) Gera GeoJSON com cor de preenchimento
+    # GeoJSONs com cores
     def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
         gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
         for feat in gj.get("features", []):
@@ -1227,23 +1284,14 @@ def render_ann_tab(
     gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
     gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
 
-    # 7.8) Plano de fundo + dois mapas lado a lado
-    base = st.radio(
-        "Plano de fundo",
-        ["OpenStreetMap", "Satélite (Mapbox)"],
-        index=0, horizontal=True, key="ann_maps_base"
-    )
-
+    # ---------------- Mapas lado a lado ----------------
+    base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
     c1, c2 = st.columns(2, gap="large")
 
     with c1:
         st.markdown("**Estágio de clusterização**")
         lyr = render_geojson_layer(gj_est, name="estagio")
-        if base.startswith("Satélite"):
-            deck([lyr], satellite=True)
-        else:
-            osm_basemap_deck([lyr])
-
+        deck([lyr], satellite=base.startswith("Satélite"))
         st.markdown("**Legenda — Estágio**")
         for k, hexc in cmap_est.items():
             st.markdown(
@@ -1255,11 +1303,7 @@ def render_ann_tab(
     with c2:
         st.markdown("**Predicted class**")
         lyr = render_geojson_layer(gj_pred, name="predicted")
-        if base.startswith("Satélite"):
-            deck([lyr], satellite=True)
-        else:
-            osm_basemap_deck([lyr])
-
+        deck([lyr], satellite=base.startswith("Satélite"))
         st.markdown("**Legenda — Predicted**")
         for k, hexc in cmap_pred.items():
             st.markdown(
@@ -1267,8 +1311,6 @@ def render_ann_tab(
                 f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
                 f"<span>{k}</span></div>", unsafe_allow_html=True
             )
-
-
     # ==================================================================================
     # 8) (Opcional) Distribuições de score / matriz de confusão se existir 'test_predictions_with_meta.csv'
     # ==================================================================================
@@ -2796,3 +2838,4 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
