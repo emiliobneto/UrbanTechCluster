@@ -1445,35 +1445,130 @@ def render_ann_tab(
     else:
         st.info("df25_com_previsoes.csv não encontrado nesta execução.")
 
-    # ==================================================================================
-    # 8) Extras — distribuições e matriz de confusão
-    # ==================================================================================
-    with st.expander("Extras — distribuições e matriz de confusão"):
-        df_meta = _load_if_exists_in(
-            repo, branch, list_files, load_csv, ann_base,
-            ["test_predictions_with_meta.csv", "predictions_df25_with_meta.csv"]
-        )
-        if isinstance(df_meta, pd.DataFrame) and not df_meta.empty and "__raw__" not in df_meta.columns:
-            cols = {c.lower(): c for c in df_meta.columns}
-            y_true = cols.get("y_true") or cols.get("true") or cols.get("label")
-            y_pred = cols.get("y_pred") or cols.get("pred") or cols.get("predicted")
-            prob_cols = [c for c in df_meta.columns if c.lower().startswith("prob_")]
-            if y_true and y_pred:
+        # ==================================================================================
+        # 8) (Opcional) Distribuições de score / matriz de confusão
+        # ==================================================================================
+        with st.expander("Extras — distribuições e matriz de confusão", expanded=False):
+    
+            # -- helper: encontra o primeiro CSV de predições com meta dentro de Data/ANN (ou subpasta escolhida)
+            def _find_predictions_with_meta(repo, branch) -> tuple[pd.DataFrame | None, str | None]:
+                cand_names = [
+                    "test_predictions_with_meta.csv",
+                    "predictions_df25_with_meta.csv",
+                    "predictions_with_meta.csv",
+                ]
+    
+                # 1) Se o usuário já selecionou uma subpasta de run antes (item 7), tente ali primeiro
+                run_dir = st.session_state.get("ann_run_dir") or st.session_state.get("ann_subdir")  # nomes que podemos ter guardado
+                if run_dir:
+                    for nm in cand_names:
+                        p = f"{run_dir.rstrip('/')}/{nm}"
+                        try:
+                            df = load_csv(repo, p, branch)
+                            if isinstance(df, pd.DataFrame) and not df.empty:
+                                return df, p
+                        except Exception:
+                            pass
+    
+                # 2) Busca recursiva sob Data/ANN
+                base_ann = _pick_dir_ann(repo, branch, pick_existing_dir).strip("/")
                 try:
-                    from sklearn.metrics import confusion_matrix
-                    labels = sorted(pd.unique(pd.concat([df_meta[y_true], df_meta[y_pred]]).astype(str)))
-                    cm = confusion_matrix(df_meta[y_true].astype(str), df_meta[y_pred].astype(str), labels=labels)
-                    df_cm = pd.DataFrame(cm, index=labels, columns=labels)
-                    fig = px.imshow(df_cm, text_auto=True, title="Matriz de confusão", aspect="auto")
-                    st.plotly_chart(fig, use_container_width=True, key=f"plt_cm_{run_sel or 'root'}")
+                    tree = github_tree_paths(repo, branch)
                 except Exception:
-                    pass
-            if prob_cols:
-                mlong = df_meta.melt(value_vars=prob_cols, var_name="classe", value_name="prob")
-                fig = px.histogram(mlong, x="prob", facet_col="classe", nbins=30, title="Distribuição de probabilidades")
-                st.plotly_chart(fig, use_container_width=True, key=f"plt_prob_{run_sel or 'root'}")
-        else:
-            st.caption("Arquivo de predições com meta ausente — ignorando extras.")
+                    tree = []
+                for nm in cand_names:
+                    for path in tree:
+                        if path.lower().startswith(base_ann.lower() + "/") and path.lower().endswith("/" + nm.lower()):
+                            try:
+                                df = load_csv(repo, path, branch)
+                                if isinstance(df, pd.DataFrame) and not df.empty:
+                                    # guarda subpasta para uso das outras seções
+                                    st.session_state["ann_run_dir"] = "/".join(path.split("/")[:-1])
+                                    return df, path
+                            except Exception:
+                                continue
+                return None, None
+    
+            df_meta, meta_path = _find_predictions_with_meta(repo, branch)
+    
+            if not (isinstance(df_meta, pd.DataFrame) and not df_meta.empty):
+                st.caption("Arquivo de predições com meta não encontrado em `Data/ANN/**` "
+                           "(procurei: test_predictions_with_meta.csv, predictions_df25_with_meta.csv, predictions_with_meta.csv).")
+            else:
+                st.caption(f"Fonte: `{meta_path}`")
+    
+                # -- detectar colunas
+                cols_low = {c.lower(): c for c in df_meta.columns}
+                # verdade:
+                y_true = (
+                    cols_low.get("y_true") or cols_low.get("true") or cols_low.get("label")
+                    or cols_low.get("classe_verdade") or cols_low.get("real") or cols_low.get("target")
+                )
+                # previsto:
+                y_pred = (
+                    cols_low.get("y_pred") or cols_low.get("pred") or cols_low.get("predicted")
+                    or cols_low.get("predicted_class") or cols_low.get("classe_prevista")
+                )
+                # caso típico do seu dataset:
+                if y_pred is None and "Predicted_Class" in df_meta.columns:
+                    y_pred = "Predicted_Class"
+    
+                # probas: prob_*, proba_* ou P(...)
+                import re as _re
+                prob_cols = [c for c in df_meta.columns
+                             if c.lower().startswith(("prob_", "proba_")) or _re.match(r"^p\(.+\)$", c.lower())]
+    
+                # ---- Matriz de confusão (se tivermos y_true e y_pred)
+                if y_true and y_pred:
+                    try:
+                        from sklearn.metrics import confusion_matrix
+                        labels = sorted(pd.unique(pd.concat([
+                            df_meta[y_true].astype(str),
+                            df_meta[y_pred].astype(str)
+                        ])))
+                        cm = confusion_matrix(df_meta[y_true].astype(str),
+                                              df_meta[y_pred].astype(str),
+                                              labels=labels)
+                        df_cm = pd.DataFrame(cm, index=labels, columns=labels)
+                        fig_cm = px.imshow(df_cm, text_auto=True, title="Matriz de confusão", aspect="auto")
+                        st.plotly_chart(fig_cm, use_container_width=True)
+                    except Exception as e:
+                        st.info(f"Não foi possível calcular a matriz de confusão ({e}).")
+    
+                # ---- Histograma das probabilidades (se existirem)
+                if prob_cols:
+                    mlong = df_meta.melt(value_vars=prob_cols, var_name="classe", value_name="prob")
+                    fig_hist = px.histogram(mlong, x="prob", facet_col="classe", nbins=30,
+                                            title="Distribuição de probabilidades por classe")
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                else:
+                    st.caption("Não encontrei colunas de probabilidade (ex.: `prob_*`, `proba_*` ou `P(classe)`).")
+    
+                # ---- TABELA-RESUMO (sempre que tivermos y_true/y_pred)
+                if y_true and y_pred:
+                    # acurácia simples
+                    acc = float((df_meta[y_true].astype(str) == df_meta[y_pred].astype(str)).mean()) if len(df_meta) else float("nan")
+    
+                    vc_true = df_meta[y_true].astype(str).value_counts(dropna=False)
+                    vc_pred = df_meta[y_pred].astype(str).value_counts(dropna=False)
+                    classes = sorted(set(vc_true.index) | set(vc_pred.index), key=str)
+    
+                    resumo = pd.DataFrame({
+                        "classe": classes,
+                        "n_true": [int(vc_true.get(c, 0)) for c in classes],
+                        "n_pred": [int(vc_pred.get(c, 0)) for c in classes],
+                    })
+                    resumo.loc["TOTAL"] = ["TOTAL", int(resumo["n_true"].sum()), int(resumo["n_pred"].sum())]
+    
+                    st.markdown("#### Resumo — contagens e acurácia")
+                    c1, c2 = st.columns([1, 3])
+                    with c1:
+                        st.metric("Acurácia (global)", f"{acc:.2%}" if pd.notna(acc) else "—")
+                    with c2:
+                        st.dataframe(resumo, use_container_width=True)
+                        download_df(resumo.reset_index(drop=True), "resumo_predictions_with_meta")
+                else:
+                    st.caption("Para a matriz de confusão e o resumo, preciso identificar as colunas de rótulo real (ex.: `y_true`, `label`) e previsto (ex.: `y_pred`, `Predicted_Class`).")
 
 # ==========================
 # SIDEBAR — Repositório e Mapbox
@@ -2972,6 +3067,7 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
 
