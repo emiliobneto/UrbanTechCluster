@@ -1085,41 +1085,103 @@ def render_ann_tab(
     st.caption(f"Lendo arquivos de: `{ann_base}`")
 
     # ==================================================================================
-    # 1) Histórico por época
+    # 1) Histórico por época (val_metrics_per_epoch.csv / keras_history.csv / metrics_over_epochs.csv)
     # ==================================================================================
     st.markdown("### 📈 Evolução por época")
+    
+    def _is_loss_like(name: str) -> bool:
+        n = str(name).lower()
+        return any(k in n for k in ["loss", "mae", "mse", "rmse"])
+    
     history_candidates = [
         "val_metrics_per_epoch.csv",
         "metrics_over_epochs.csv",
         "keras_history.csv",
     ]
+    
     any_history = False
+    hist_summary_rows = []   # ← resumo para tabela ao final
+    
     for name in history_candidates:
         df_hist = _load_if_exists_in(repo, branch, list_files, load_csv, ann_base, [name])
-        if isinstance(df_hist, pd.DataFrame) and not df_hist.empty and "__raw__" not in df_hist.columns:
-            any_history = True
-            st.markdown(f"**Arquivo:** `{name}`")
-            epoch_col, metric_cols = _cols_detect_epoch_metrics(df_hist)
-            if not metric_cols:
-                st.info("Nenhuma métrica reconhecida.")
-            else:
-                for m in metric_cols:
-                    ycols = [m]
-                    for alt in [f"val_{m}", f"val-{m}", f"val{m}"]:
-                        if alt in df_hist.columns:
-                            ycols.append(alt)
-                            break
-                    fig = px.line(
-                        df_hist,
-                        x=epoch_col or df_hist.index,
-                        y=ycols,
-                        markers=True,
-                        title=f"{m} por época",
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+        if not (isinstance(df_hist, pd.DataFrame) and not df_hist.empty and "__raw__" not in df_hist.columns):
+            continue
+    
+        any_history = True
+        st.markdown(f"**Arquivo:** `{name}`")
+        epoch_col, metric_cols = _cols_detect_epoch_metrics(df_hist)
+    
+        if not metric_cols:
+            st.info("Nenhuma métrica reconhecida.")
             st.divider()
+            continue
+    
+        # chave base única para evitar StreamlitDuplicateElementId
+        keybase = f"{run_sel or 'root'}_{name}"
+    
+        for m in metric_cols:
+            # tenta achar a versão 'val_' da mesma métrica
+            val_col = None
+            for alt in [f"val_{m}", f"val-{m}", f"val{m}"]:
+                if alt in df_hist.columns:
+                    val_col = alt
+                    break
+    
+            ycols = [m] + ([val_col] if val_col else [])
+            fig = px.line(
+                df_hist,
+                x=epoch_col or df_hist.index,
+                y=ycols,
+                markers=True,
+                title=f"{m} por época",
+            )
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key=f"plt_hist_{keybase}_{m}".replace(" ", "_")
+            )
+    
+            # ---------- coleta de resumo ----------
+            dir_min = _is_loss_like(m)  # True → minimizar; False → maximizar
+            ep = (df_hist[epoch_col] if epoch_col else pd.Series(np.arange(len(df_hist))))
+            # treino
+            s_tr = pd.to_numeric(df_hist[m], errors="coerce")
+            if s_tr.notna().any():
+                idx_best_tr = int((s_tr.idxmin() if dir_min else s_tr.idxmax()))
+                hist_summary_rows.append({
+                    "arquivo": name,
+                    "metrica": m,
+                    "epocas": int(len(df_hist)),
+                    "treino_ultimo": float(s_tr.iloc[-1]),
+                    "treino_melhor": float(s_tr.min() if dir_min else s_tr.max()),
+                    "treino_ep_melhor": int(ep.iloc[idx_best_tr]),
+                })
+            # validação (se houver)
+            if val_col:
+                s_val = pd.to_numeric(df_hist[val_col], errors="coerce")
+                if s_val.notna().any():
+                    idx_best_val = int((s_val.idxmin() if dir_min else s_val.idxmax()))
+                    last_row = next((r for r in reversed(hist_summary_rows) if r["metrica"] == m and r["arquivo"] == name), None)
+                    if last_row is not None:
+                        last_row.update({
+                            "val_ultimo": float(s_val.iloc[-1]),
+                            "val_melhor": float(s_val.min() if dir_min else s_val.max()),
+                            "val_ep_melhor": int(ep.iloc[idx_best_val]),
+                        })
+    
+        st.divider()
+    
     if not any_history:
         st.info("Não encontrei arquivos de histórico por época nesta execução.")
+    else:
+        # ---------- Tabela de resumo após os gráficos ----------
+        df_hist_sum = pd.DataFrame(hist_summary_rows)
+        if not df_hist_sum.empty:
+            # ordena por arquivo/metric
+            df_hist_sum = df_hist_sum.sort_values(["arquivo", "metrica"]).reset_index(drop=True)
+            st.markdown("**Resumo — métricas por época (último vs. melhor)**")
+            st.dataframe(df_hist_sum, use_container_width=True)
+            download_df(df_hist_sum, f"history_summary_{(run_sel or 'root')}")
 
     # ==================================================================================
     # 2) AUC por classe
@@ -1131,7 +1193,7 @@ def render_ann_tab(
         class_col = cols.get("class") or cols.get("label") or cols.get("classe") or list(df_auc.columns)[0]
         auc_col = cols.get("auc") or cols.get("roc_auc") or list(df_auc.columns)[1]
         fig = px.bar(df_auc, x=class_col, y=auc_col, title="AUC por classe")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"plt_auc_{run_sel or 'root'}")
         st.dataframe(df_auc, use_container_width=True)
     else:
         st.info("auc_summary.csv não encontrado nesta execução.")
@@ -1159,7 +1221,7 @@ def render_ann_tab(
             st.dataframe(df_cr, use_container_width=True)
             if "f1" in df_cr.columns:
                 fig = px.bar(df_cr[df_cr["label"].str.lower() != "accuracy"], x="label", y="f1", title="F1-score por classe")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"plt_cls_{run_sel or 'root'}")
         else:
             st.info("Não consegui extrair a tabela do classification_report.")
     else:
@@ -1178,7 +1240,7 @@ def render_ann_tab(
             df_ht["mlog10"] = -np.log10(pd.to_numeric(df_ht[p_col], errors="coerce").clip(lower=1e-300))
             fig = px.bar(df_ht.sort_values("mlog10", ascending=False), x=name_col, y="mlog10", title="-log10(p)")
             fig.add_hline(y=-np.log10(0.05))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"plt_ht_{run_sel or 'root'}")
         st.dataframe(df_ht, use_container_width=True)
     else:
         st.info("hypothesis_tests.csv não encontrado nesta execução.")
@@ -1196,7 +1258,7 @@ def render_ann_tab(
                                 value_vars=num_cols, var_name="metric", value_name="value")
             if "metric" in melted.columns and "value" in melted.columns:
                 fig = px.bar(melted, x="metric", y="value", title="Métricas (agregadas)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"plt_ms_{run_sel or 'root'}")
     else:
         st.info("metrics_summary.csv não encontrado nesta execução.")
 
@@ -1215,7 +1277,7 @@ def render_ann_tab(
                     if key in params and isinstance(params[key], (list, tuple)) and len(params[key]) > 0:
                         dfp_ = pd.DataFrame({"feature": list(range(len(params[key]))), key: params[key]})
                         fig = px.bar(dfp_, x="feature", y=key, title=f"Scaler: {key}")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key=f"plt_scaler_{run_sel or 'root'}_{key}")
         else:
             st.info(f"{fname} não encontrado nesta execução.")
 
@@ -1343,13 +1405,13 @@ def render_ann_tab(
                     cm = confusion_matrix(df_meta[y_true].astype(str), df_meta[y_pred].astype(str), labels=labels)
                     df_cm = pd.DataFrame(cm, index=labels, columns=labels)
                     fig = px.imshow(df_cm, text_auto=True, title="Matriz de confusão", aspect="auto")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"plt_cm_{run_sel or 'root'}")
                 except Exception:
                     pass
             if prob_cols:
                 mlong = df_meta.melt(value_vars=prob_cols, var_name="classe", value_name="prob")
                 fig = px.histogram(mlong, x="prob", facet_col="classe", nbins=30, title="Distribuição de probabilidades")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"plt_prob_{run_sel or 'root'}")
         else:
             st.caption("Arquivo de predições com meta ausente — ignorando extras.")
 
@@ -2850,6 +2912,7 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
 
