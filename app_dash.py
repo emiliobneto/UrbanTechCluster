@@ -1145,22 +1145,23 @@ def render_ann_tab(
         else:
             st.info(f"{fname} não encontrado.")
 
-   # ==================================================================================
-# 7) Mapas lado a lado (df25_com_previsoes.*): Estágio vs Predicted class
-# ==================================================================================
-st.markdown("### 🗺️ Mapas — Estágio de clusterização × Predicted class")
+    # ==================================================================================
+    # 7) Mapas lado a lado (df25_com_previsoes.*): Estágio vs Predicted class
+    # ==================================================================================
+    st.markdown("### 🗺️ Mapas — Estágio de clusterização × Predicted class")
 
-# 7.1 — Escolha da pasta do experimento dentro de Data/ANN
-ann_base = _pick_dir_ann(repo, branch, pick_existing_dir)
-try:
-    ann_entries = github_listdir(repo, ann_base, branch)  # helper global já definido no app
-    ann_folders = [e["name"] for e in ann_entries if isinstance(e, dict) and e.get("type") == "dir"]
-except Exception:
-    ann_folders = []
+    # 7.1 — Seleção da subpasta em Data/ANN
+    ann_base = _pick_dir_ann(repo, branch, pick_existing_dir)  # ex.: Data/ANN
+    try:
+        ann_entries = github_listdir(repo, ann_base, branch)  # lista conteúdo (dirs/arquivos)
+        ann_folders = [e["name"] for e in ann_entries
+                       if isinstance(e, dict) and e.get("type") == "dir"]
+    except Exception:
+        ann_folders = []
+    if not ann_folders:
+        st.info("Nenhuma subpasta encontrada em `Data/ANN`.")
+        return
 
-if not ann_folders:
-    st.info("Nenhuma subpasta encontrada em `Data/ANN`.")
-else:
     exp_sel = st.selectbox("Experimento (subpasta de Data/ANN)", ann_folders, index=0, key="ann_item7_dir")
     exp_dir = f"{ann_base.rstrip('/')}/{exp_sel}"
 
@@ -1168,131 +1169,135 @@ else:
     files_here = list_files(repo, exp_dir, branch, exts=(".csv", ".parquet"))
     def _match_df25(nm: str) -> bool:
         s = nm.lower()
-        return ("df25" in s) and ("previs" in s)  # pega df25_com_previsoes.*
+        return ("df25" in s) and ("previs" in s)  # casa df25_com_previsoes.*
     hit = next((f for f in files_here if _match_df25(f["name"])), None)
 
     if not hit:
         st.warning("Não encontrei `df25_com_previsoes.(csv|parquet)` na pasta selecionada.")
-    else:
-        df25_path = hit["path"]
-        df_pred = load_parquet(repo, df25_path, branch) if df25_path.lower().endswith(".parquet") else load_csv(repo, df25_path, branch)
+        return
 
-        # 7.3 — Detecta colunas relevantes
-        cols = list(df_pred.columns)
-        cols_norm = {_norm_text(c): c for c in cols}
+    df25_path = hit["path"]
+    df_pred = (
+        load_parquet(repo, df25_path, branch)
+        if df25_path.lower().endswith(".parquet")
+        else load_csv(repo, df25_path, branch)
+    )
+    if not isinstance(df_pred, pd.DataFrame) or df_pred.empty:
+        st.warning("Arquivo de previsões vazio ou inválido.")
+        return
 
-        # SQ
-        sq_col = next((c for c in cols if _norm_text(c) == "sq"), None)
-        if sq_col is None:
-            sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
+    # 7.3 — Detecta colunas relevantes
+    cols = list(df_pred.columns)
+    cols_norm = {_norm_text(c): c for c in cols}
 
-        # Estágio de clusterização
-        est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
-        if est_col is None:
-            est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
+    # SQ
+    sq_col = next((c for c in cols if _norm_text(c) == "sq"), None)
+    if sq_col is None:
+        sq_col = next((c for c in cols if _norm_text(c) in {"id", "codigo", "code"}), None)
 
-        # Predicted class
-        pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
-        if pred_col is None:
-            pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
+    # Estágio de clusterização
+    est_col = next((c for c in cols if ("estagio" in _norm_text(c) and "cluster" in _norm_text(c))), None)
+    if est_col is None:
+        est_col = cols_norm.get("estagioclusterizacao") or cols_norm.get("estagio de clusterizacao")
 
-        if not sq_col:
-            st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.")
-        elif not est_col or not pred_col:
-            st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
-            st.dataframe(df_pred.head(), use_container_width=True)
-        else:
-            # 7.4 — Carrega quadras com cache
-            gdf_quadras = st.session_state.get("gdf_quadras_cached")
-            if gdf_quadras is None or gdf_quadras.empty:
-                try:
-                    gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
-                    st.session_state["gdf_quadras_cached"] = gdf_quadras
-                except Exception as e:
-                    st.error(f"Falha carregando quadras.gpkg: {e}")
-                    st.stop()
+    # Predicted class
+    pred_col = next((c for c in cols if ("pred" in _norm_text(c) and "class" in _norm_text(c))), None)
+    if pred_col is None:
+        pred_col = cols_norm.get("predicted") or cols_norm.get("pred_class") or cols_norm.get("predicted class")
 
-            geom_name = gdf_quadras.geometry.name
-            sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
-            if not sq_geo_col:
-                st.error("A camada de quadras não possui coluna 'SQ'.")
-                st.stop()
+    if not sq_col:
+        st.error("Não encontrei a coluna 'SQ' (ou equivalente) em df25_com_previsoes.")
+        return
+    if not est_col or not pred_col:
+        st.warning("Não encontrei as colunas de 'Estágio de clusterização' e/ou 'Predicted class'. Exibindo preview do arquivo.")
+        st.dataframe(df_pred.head(), use_container_width=True)
+        return
 
-            # 7.5 — Normalização robusta da chave de junção (evita ValueError no merge)
-            import re as _re
-            def _digits(s):
-                return _re.sub(r"\D", "", "" if s is None else str(s))
+    # 7.4 — Carrega quadras com cache
+    gdf_quadras = st.session_state.get("gdf_quadras_cached")
+    if gdf_quadras is None or gdf_quadras.empty:
+        try:
+            gdf_quadras = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
+            st.session_state["gdf_quadras_cached"] = gdf_quadras
+        except Exception as e:
+            st.error(f"Falha carregando quadras.gpkg: {e}")
+            return  # encerra só a aba 4
 
-            # calcula largura alvo (máximo nº de dígitos em ambos)
-            pred_digits = df_pred[sq_col].astype("string").map(_digits)
-            quad_digits = gdf_quadras[sq_geo_col].astype("string").map(_digits)
-            width = max(pred_digits.str.len().max() or 0, quad_digits.str.len().max() or 0)
-            width = int(width) if (width and width > 0) else 6  # fallback
+    geom_name = gdf_quadras.geometry.name
+    sq_geo_col = next((c for c in gdf_quadras.columns if _norm_text(c) == "sq"), None)
+    if not sq_geo_col:
+        st.error("A camada de quadras não possui coluna 'SQ'.")
+        return
 
-            dfp = df_pred[[sq_col, est_col, pred_col]].copy()
-            dfp.columns = ["SQ_raw", "estagio", "predicted"]
-            dfp["__sq_norm__"] = dfp["SQ_raw"].astype("string").map(_digits).str.zfill(width)
+    # 7.5 — Normalização robusta da chave (evita ValueError no merge)
+    import re as _re
+    def _digits(s):
+        return _re.sub(r"\D", "", "" if s is None else str(s))
 
-            gq = gdf_quadras[[sq_geo_col, geom_name]].copy()
-            gq["__sq_norm__"] = gq[sq_geo_col].astype("string").map(_digits).str.zfill(width)
+    pred_digits = df_pred[sq_col].astype("string").map(_digits)
+    quad_digits = gdf_quadras[sq_geo_col].astype("string").map(_digits)
+    width = max(int(pred_digits.str.len().max() or 0), int(quad_digits.str.len().max() or 0))
+    width = width if width > 0 else 6
 
-            # 7.6 — Merge seguro e CRS
-            gdf = gq.merge(dfp[["__sq_norm__", "estagio", "predicted"]], on="__sq_norm__", how="left")
-            gdf = ensure_wgs84(gdf)
+    dfp = df_pred[[sq_col, est_col, pred_col]].copy()
+    dfp.columns = ["SQ_raw", "estagio", "predicted"]
+    dfp["__sq_norm__"] = dfp["SQ_raw"].astype("string").map(_digits).str.zfill(width)
 
-            # 7.7 — Paletas e GeoJSONs
-            cmap_est = _cat_palette_from_values(gdf["estagio"], pick_categorical)
-            cmap_pred = _cat_palette_from_values(gdf["predicted"], pick_categorical)
+    gq = gdf_quadras[[sq_geo_col, geom_name]].copy()
+    gq["__sq_norm__"] = gq[sq_geo_col].astype("string").map(_digits).str.zfill(width)
 
-            def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
-                gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
-                for feat in gj.get("features", []):
-                    v = feat.get("properties", {}).get(value_col, None)
-                    hexc = cmap.get(str(v), "#999999")
-                    feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
-                return gj
+    # 7.6 — Merge seguro e CRS
+    gdf = gq.merge(dfp[["__sq_norm__", "estagio", "predicted"]], on="__sq_norm__", how="left")
+    gdf = ensure_wgs84(gdf)
 
-            gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
-            gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
+    # 7.7 — Paletas e GeoJSONs
+    cmap_est = _cat_palette_from_values(gdf["estagio"], pick_categorical)
+    cmap_pred = _cat_palette_from_values(gdf["predicted"], pick_categorical)
 
-            # 7.8 — Plano de fundo e mapas
-            base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
+    def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
+        gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
+        for feat in gj.get("features", []):
+            v = feat.get("properties", {}).get(value_col, None)
+            hexc = cmap.get(str(v), "#999999")
+            feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+        return gj
 
-            c1, c2 = st.columns(2, gap="large")
-            with c1:
-                st.markdown("**Estágio de clusterização**")
-                lyr = render_geojson_layer(gj_est, name="estagio")
-                if base.startswith("Satélite"):
-                    deck([lyr], satellite=True)
-                else:
-                    osm_basemap_deck([lyr])
-                st.markdown("**Legenda — Estágio**")
-                for k, hexc in cmap_est.items():
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                        f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                        f"<span>{k}</span></div>", unsafe_allow_html=True
-                    )
-            with c2:
-                st.markdown("**Predicted class**")
-                lyr = render_geojson_layer(gj_pred, name="predicted")
-                if base.startswith("Satélite"):
-                    deck([lyr], satellite=True)
-                else:
-                    osm_basemap_deck([lyr])
-                st.markdown("**Legenda — Predicted**")
-                for k, hexc in cmap_pred.items():
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
-                        f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
-                        f"<span>{k}</span></div>", unsafe_allow_html=True
-                    )
+    gj_est = _geojson_with_fill(gdf, "estagio", cmap_est)
+    gj_pred = _geojson_with_fill(gdf, "predicted", cmap_pred)
 
-            # (opcional) pequeno diagnóstico do join
-            with st.expander("🔎 Debug — Join SQ"):
-                total_quad = int(len(gq))
-                com_match = int(gdf["estagio"].notna().sum())
-                st.write({"exp_dir": exp_dir, "arquivo": df25_path, "quadras_total": total_quad, "quadras_com_match": com_match, "width_zfill": width})
+    # 7.8 — Plano de fundo e mapas
+    base = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="ann_maps_base")
+
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        st.markdown("**Estágio de clusterização**")
+        lyr = render_geojson_layer(gj_est, name="estagio")
+        deck([lyr], satellite=True) if base.startswith("Satélite") else osm_basemap_deck([lyr])
+        st.markdown("**Legenda — Estágio**")
+        for k, hexc in cmap_est.items():
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                f"<span>{k}</span></div>", unsafe_allow_html=True
+            )
+    with c2:
+        st.markdown("**Predicted class**")
+        lyr = render_geojson_layer(gj_pred, name="predicted")
+        deck([lyr], satellite=True) if base.startswith("Satélite") else osm_basemap_deck([lyr])
+        st.markdown("**Legenda — Predicted**")
+        for k, hexc in cmap_pred.items():
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;margin:2px 0'>"
+                f"<span style='display:inline-block;width:14px;height:14px;border:1px solid #0003;background:{hexc}'></span>"
+                f"<span>{k}</span></div>", unsafe_allow_html=True
+            )
+
+    # (opcional) diagnóstico do join
+    with st.expander("🔎 Debug — Join SQ (item 7)"):
+        total_quad = int(len(gq))
+        com_match = int(gdf["estagio"].notna().sum())
+        st.write({"exp_dir": exp_dir, "arquivo": df25_path, "quadras_total": total_quad,
+                  "quadras_com_match": com_match, "width_zfill": width})
 
     # ==================================================================================
     # 8) (Opcional) Distribuições de score / matriz de confusão se existir 'test_predictions_with_meta.csv'
@@ -2821,5 +2826,6 @@ with tab4:
         osm_basemap_deck=osm_basemap_deck,
         deck=deck,
     )
+
 
 
