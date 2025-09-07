@@ -2571,7 +2571,53 @@ with tab2:
     preferred = next((c for c in cluster_cols if c.lower()=="estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols,
                                index=cluster_cols.index(preferred), key="t2_cluster_col")
-
+    # --- Plano de fundo e modo de visualização do mapa (aba 2)
+    base_map_t2 = st.radio(
+        "Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"],
+        index=0, horizontal=True, key="t2_base"
+    )
+    view_mode = st.radio(
+        "Visualização do mapa", ["Mapa geral", "Recorte(s)"],
+        index=0, horizontal=True, key="t2_view"
+    )
+    
+    # --- Normaliza/filtra clusters para JOIN (df_est_clean)
+    import re as _re
+    
+    @st.cache_data(show_spinner=False)
+    def _to_int_code(x):
+        try:
+            v = float(str(x).strip())
+            if np.isfinite(v) and abs(v - int(v)) < 1e-9:
+                return int(v)
+        except Exception:
+            pass
+        m = _re.search(r"\d+", str(x))
+        return int(m.group(0)) if m else None
+    
+    df_est_clean = df_est_raw.copy()
+    # SQ normalizado
+    sq_est_col = next((c for c in df_est_clean.columns if str(c).upper() == "SQ"), None)
+    if sq_est_col is None:
+        st.error("Arquivo de clusters precisa ter coluna 'SQ'.")
+        st.stop()
+    df_est_clean["_SQ_norm"] = _norm_sq_series(df_est_clean[sq_est_col])
+    
+    # filtro de ano (se houver)
+    if (ano_col_est is not None) and (year_sel is not None):
+        df_est_clean = df_est_clean[
+            pd.to_numeric(df_est_clean[ano_col_est], errors="coerce").astype("Int64") == year_sel
+        ].copy()
+    
+    # cluster → código 0..3
+    df_est_clean["_cl_code"] = df_est_clean[cluster_col].map(_to_int_code).astype("Int64")
+    # de-duplicação por SQ
+    df_est_clean = (
+        df_est_clean.sort_values(["_SQ_norm", "_cl_code"])
+                    .drop_duplicates("_SQ_norm", keep="last")
+                    .dropna(subset=["_SQ_norm", "_cl_code"])
+                    [["_SQ_norm", "_cl_code"]]
+    )
     # ==========
     # QUADRAS mínimas
     # ==========
@@ -2632,90 +2678,148 @@ with tab2:
     else:
         df_metrics_all = st.session_state.get(metrics_key)
 
-    # ==========
-    # (MAPA da aba continua igual ao seu código atual — usa gdfq_min/df_est_raw etc.)
-    # ==========
-
+    st.markdown("### 🗺️ Mapa de clusterização")
+    
+    # junta quadras (mínimo) + clusters
+    gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
+    
+    # simplificação opcional (só em polígonos, quando não for centróide)
+    if (not fast_map) and simplify_tol and simplify_tol > 0:
+        try:
+            gdf_map = gdf_map.copy()
+            gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
+        except Exception:
+            pass
+    
+    # paleta e legendas (fixa 0..3)
+    palette = pick_categorical(4)
+    label_map = {
+        0: "0 – Ausência de clusterização",
+        1: "1 – Cluster em estágio inicial",
+        2: "2 – Cluster em formação",
+        3: "3 – Clusterizado",
+    }
+    
+    def _geojson_colored(gdf_in, use_centroid: bool):
+        geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
+        gg = gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}).copy()
+        gj = make_geojson(gg)
+        for feat in gj.get("features", []):
+            cl = feat.get("properties", {}).get("_cl_code", None)
+            hexc = palette[int(cl)] if (cl in [0,1,2,3]) else "#999999"
+            feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
+            feat["properties"]["name"] = f"Cluster {cl}"
+            feat["properties"]["value"] = label_map.get(int(cl), str(cl))
+        return gj
+    
+    def _draw_map(layers):
+        if base_map_t2.startswith("Satélite"):
+            deck(layers, satellite=True)
+        else:
+            osm_basemap_deck(layers)
+    
+    if view_mode == "Mapa geral":
+        # centralizado
+        colL, colC, colR = st.columns([0.08, 0.84, 0.08])
+        with colC:
+            gj = _geojson_colored(gdf_map, use_centroid=fast_map)
+            lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
+            _draw_map([lyr])
+    
+        # legenda
+        st.markdown("**Legenda — clusters**")
+        for c in [0,1,2,3]:
+            _legend_row(palette[c], label_map[c])
+    
+    else:
+        # Recortes lado a lado
+        rec_dir = pick_existing_dir(
+            repo, branch,
+            ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"]
+        )
+        rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
+        if not rec_files:
+            st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
+        else:
+            rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2_rec_file")
+            rec_obj = next(x for x in rec_files if x["name"] == rec_name)
+            gdf_rec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+    
+            # interseção: pega só o que cai no recorte
+            try:
+                import geopandas as gpd
+                gq = gdf_map[[gdf_map.geometry.name]].copy()
+                gq = ensure_wgs84(gq).set_geometry(gdf_map.geometry.name)
+                sel_idx = gpd.sjoin(gq, ensure_wgs84(gdf_rec)[["geometry"]], predicate="intersects", how="inner").index.unique()
+                gdf_sub = gdf_map.loc[sel_idx].copy()
+            except Exception:
+                # fallback: bbox
+                bbox = gdf_rec.total_bounds
+                gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+    
+            # camada preenchida + borda do recorte
+            gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
+            lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
+            lyr_brd = render_line_layer(make_geojson(gdf_rec), "borda recorte")
+    
+            c1, c2 = st.columns([1.6, 1], gap="large")
+            with c1:
+                _draw_map([lyr_sub, lyr_brd])
+            with c2:
+                st.markdown("**Legenda — clusters**")
+                for c in [0,1,2,3]:
+                    _legend_row(palette[c], label_map[c])
+                st.metric("Feições no recorte", len(gdf_sub))
 
         st.divider()
-    st.subheader("📊 Métricas por cluster — univariadas")
-
-    # 1) preferir as métricas pré-carregadas (rápidas após 1ª vez)
-    if isinstance(st.session_state.get(metrics_key), pd.DataFrame) and not st.session_state[metrics_key].empty:
-        dfm = st.session_state[metrics_key].copy()
-        # seleção de ano
-        anos_list = sorted([a for a in dfm["ano"].dropna().unique().tolist() if a is not None]) or [None]
-        ano_uni = st.select_slider("Ano", options=anos_list, value=anos_list[-1], key="t2_uni_ano_cached") if anos_list != [None] else None
-        if ano_uni is not None:
-            dfm = dfm[dfm["ano"] == ano_uni]
-
-        estat = st.radio("Estatística", ["Média","Mediana"], horizontal=True, key="t2_uni_stat")
-        stat_col = "media" if estat=="Média" else "mediana"
-        var_opts = sorted(dfm["variavel"].dropna().astype(str).unique().tolist())
-        vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[:min(10, len(var_opts))], key="t2_uni_vars_cached")
-
-        if vars_sel:
-            sub = dfm[dfm["variavel"].isin(vars_sel)].copy()
-            piv = sub.pivot_table(index="cluster_label", columns="variavel", values=stat_col, aggfunc="first").reindex(
-                ["0 – Ausência de clusterização","1 – Cluster em estágio inicial","2 – Cluster em formação","3 – Clusterizado"]
-            )
-            st.markdown("**Tabela — Valor por cluster (0–3)**")
-            st.dataframe(piv, use_container_width=True)
-            download_df(piv.reset_index().rename(columns={"index":"Cluster"}),
-                        f"univariadas_cache_{stat_col}{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster")
+        st.subheader("📊 Métricas por cluster — univariadas")
+        
+        # usa cache se existir; se não, calcula agora (com cache interno da função)
+        dfm = st.session_state.get(metrics_key, None)
+        if dfm is None or dfm.empty:
+            with st.spinner("Calculando métricas por cluster×ano..."):
+                dfm = _preload_cluster_metrics_by_year(
+                    df_vals_raw, df_est_raw, cluster_col, chunk_size=max_vars
+                )
+            st.session_state[metrics_key] = dfm
+        
+        if dfm is None or dfm.empty:
+            st.warning("Não foi possível calcular as métricas. Verifique se os dois arquivos possuem 'SQ' e variáveis numéricas.")
         else:
-            st.info("Selecione ao menos uma variável.")
-    else:
-        # 2) fallback: usa Data/analises/*/univariadas.parquet (como no seu código original)
-        @st.cache_data(show_spinner=True, max_entries=4)
-        def _load_univariadas(version: str):
-            base = "Data/analises/original" if version == "originais" else "Data/analises/winsorizados"
-            path = f"{base}/univariadas.parquet"
-            try:
-                return load_parquet(repo, path, branch)
-            except Exception:
-                return None
-
-        ver_uni = st.radio("Versão", ["originais", "winsorizados"], horizontal=True, key="t2_uni_ver_fallback")
-        dfu = _load_univariadas(ver_uni)
-
-        if dfu is None or dfu.empty:
-            st.info("`univariadas.parquet` não encontrado, e não há cache pré-carregado disponível.")
-        else:
-            col_var = next((c for c in dfu.columns if str(c).lower()=="variavel"), None)
-            col_clu = next((c for c in dfu.columns if str(c).lower()=="cluster"), None)
-            col_ano = next((c for c in dfu.columns if str(c).lower() in ("ano","year")), None)
-            if not (col_var and col_clu):
-                st.error("Arquivo univariadas precisa conter colunas 'variavel' e 'cluster'.")
+            anos_list = sorted([a for a in dfm["ano"].dropna().unique().tolist() if a is not None]) or [None]
+            ano_uni = st.select_slider("Ano", options=anos_list,
+                                       value=(anos_list[-1] if anos_list != [None] else None),
+                                       key="t2_uni_ano")
+            if ano_uni is not None:
+                dfm = dfm[dfm["ano"] == ano_uni]
+        
+            estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="t2_uni_stat")
+            stat_col = "media" if estat == "Média" else "mediana"
+        
+            var_opts = sorted(dfm["variavel"].dropna().astype(str).unique().tolist())
+            if not var_opts:
+                st.info("Nenhuma variável numérica encontrada para compor as univariadas.")
             else:
-                if col_ano and dfu[col_ano].notna().any():
-                    anos = sorted(pd.to_numeric(dfu[col_ano], errors="coerce").dropna().astype(int).unique().tolist())
-                    ano_uni = st.select_slider("Ano", options=anos, value=anos[-1], key="t2_uni_ano_fallback")
-                    dfy = dfu[pd.to_numeric(dfu[col_ano], errors="coerce").astype("Int64")==ano_uni].copy()
+                vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[:min(10, len(var_opts))], key="t2_uni_vars")
+                if vars_sel:
+                    sub = dfm[dfm["variavel"].isin(vars_sel)].copy()
+                    piv = (
+                        sub.pivot_table(index="cluster_label", columns="variavel", values=stat_col, aggfunc="first")
+                           .reindex([
+                               "0 – Ausência de clusterização",
+                               "1 – Cluster em estágio inicial",
+                               "2 – Cluster em formação",
+                               "3 – Clusterizado",
+                           ])
+                    )
+                    st.markdown("**Tabela — Valor por cluster (0–3)**")
+                    st.dataframe(piv, use_container_width=True)
+                    download_df(
+                        piv.reset_index().rename(columns={"index": "Cluster"}),
+                        f"univariadas_{stat_col}{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster"
+                    )
                 else:
-                    ano_uni = None
-                    dfy = dfu.copy()
-
-                estat = st.radio("Estatística", ["Média","Mediana"], horizontal=True, key="t2_uni_stat_fallback")
-                stat_col = "media" if estat=="Média" else "mediana"
-                if stat_col not in dfy.columns:
-                    st.error(f"Coluna '{stat_col}' não encontrada.")
-                else:
-                    var_opts = sorted(dfy[col_var].dropna().astype(str).unique().tolist())
-                    vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[:min(10, len(var_opts))], key="t2_uni_vars_fallback")
-
-                    if vars_sel:
-                        dfy["_cl_code"] = pd.to_numeric(dfy[col_clu], errors="coerce").astype("Int64")
-                        dfc = dfy[dfy["_cl_code"].isin([0,1,2,3]) & dfy[col_var].isin(vars_sel)].copy()
-                        piv = dfc.pivot_table(index="_cl_code", columns=col_var, values=stat_col, aggfunc="first").sort_index()
-                        piv.index = [label_map.get(int(i), str(i)) for i in piv.index]
-                        st.markdown("**Tabela — Valor por cluster (0–3)**")
-                        st.dataframe(piv, use_container_width=True)
-                        download_df(piv.reset_index().rename(columns={"index":"Cluster"}),
-                                    f"univariadas_{ver_uni}_{stat_col}"
-                                    f"{'_'+str(ano_uni) if ano_uni is not None else ''}_por_cluster")
-                    else:
-                        st.info("Selecione ao menos uma variável.")
+                    st.info("Selecione ao menos uma variável.")
 
 
     # ==========================
@@ -2726,7 +2830,6 @@ with tab2:
 
     use_shapiro = st.checkbox("Calcular Shapiro por cluster (mais lento)", value=False, key="t2_shapiro")
     shapiro_cap = st.slider("Máx. amostras por Shapiro (cap)", 500, 10000, 5000, 500, key="t2_shapiro_cap")
-    df_desc = _compute_descritiva_fast(df_join, tuple(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)
 
     
     try:
@@ -2837,7 +2940,7 @@ with tab2:
     df_vals_use["_SQ_norm"] = _norm_sq_series(df_vals_use[sq_col_vals])
     df_join = df_vals_use.merge(df_est_clean, on="_SQ_norm", how="inner")
     df_join = df_join[df_join["_cl_code"].isin([0,1,2,3])].copy()
-
+    df_desc = _compute_descritiva_fast(df_join, tuple(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas & Testes (lado a lado com índice de significância)
 # -----------------------------------------------------------------------------
@@ -3387,6 +3490,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
