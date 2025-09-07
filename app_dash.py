@@ -10,7 +10,13 @@ import pydeck as pdk
 import requests
 import streamlit as st
 
-
+try:
+    from scipy.stats import spearmanr as _spearman_fn, shapiro as _shapiro_fn, \
+         ttest_ind as _ttest_fn, mannwhitneyu as _mw_fn, \
+         f_oneway as _anova_fn, kruskal as _kruskal_fn
+except Exception:
+    _spearman_fn = _shapiro_fn = _ttest_fn = _mw_fn = _anova_fn = _kruskal_fn = None
+    
 # ——— CONFIGURAÇÃO GERAL (deve ser a 1ª chamada Streamlit) ———
 st.set_page_config(
     page_title="MODELO DE REDE NEURAL ARTIFICIAL — Clusters SP",
@@ -744,9 +750,19 @@ def ensure_wgs84(gdf):
 
 
 def make_geojson(gdf):
+    try:
+        import geopandas as gpd
+    except Exception:
+        raise RuntimeError("geopandas é necessário para montar GeoJSON.")
+
+    # Se não for GeoDataFrame, mas tiver coluna 'geometry', converte
+    if not isinstance(gdf, gpd.GeoDataFrame):
+        if "geometry" in getattr(gdf, "columns", []):
+            gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=getattr(gdf, "crs", 4326))
+        else:
+            raise RuntimeError("Objeto sem coluna 'geometry' para gerar GeoJSON.")
     gdf = ensure_wgs84(gdf)
     return json.loads(gdf.to_json())
-
 
 def render_geojson_layer(geojson_obj, name="Polygons"):
     return pdk.Layer(
@@ -2680,9 +2696,17 @@ with tab2:
 
     palette = pick_categorical(4)
 
+
     def _geojson_colored(gdf_in, use_centroid: bool):
+        import geopandas as gpd
         geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
-        gg = gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}).copy()
+    
+        # constrói um GeoDataFrame com a geometria correta ativada
+        gg = gpd.GeoDataFrame(
+            gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
+            geometry="geometry",
+            crs=getattr(gdf_in, "crs", 4326)
+        )
         gj = make_geojson(gg)
         for feat in gj.get("features", []):
             cl = feat.get("properties", {}).get("_cl_code", None)
@@ -2691,6 +2715,7 @@ with tab2:
             feat["properties"]["name"] = f"Cluster {cl}"
             feat["properties"]["value"] = label_map.get(int(cl), str(cl))
         return gj
+
 
     def _draw_map(layers):
         if base_map_t2.startswith("Satélite"):
@@ -2722,7 +2747,14 @@ with tab2:
             # interseção: pega só o que cai no recorte
             try:
                 import geopandas as gpd
-                gq = ensure_wgs84(gdf_map[[gdf_map.geometry.name]].copy())
+                gq = gdf_map[[gdf_map.geometry.name]].copy()
+                # assegura GeoDataFrame + CRS
+                gq = gpd.GeoDataFrame(gq, geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
+                gq = ensure_wgs84(gq)
+                
+                gr = ensure_wgs84(gdf_rec)[["geometry"]]
+                sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
+                gdf_sub = gdf_map.loc[sel_idx].copy()
                 sel_idx = gpd.sjoin(gq, ensure_wgs84(gdf_rec)[["geometry"]], predicate="intersects", how="inner").index.unique()
                 gdf_sub = gdf_map.loc[sel_idx].copy()
             except Exception:
@@ -3452,6 +3484,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
