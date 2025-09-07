@@ -11,6 +11,9 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import plotly.express as px
+import unicodedata
+import ast
 
 # ---- SciPy (opcional; com fallback seguro) ----
 try:
@@ -863,54 +866,6 @@ def _compute_pairs_fast(
 # CORES / CLASSIF / MAPAS / LEGENDAS
 # ==========================
 
-def hex_to_rgba(hex_color, alpha: int = 180):
-    """Converte #RRGGBB ou #RGB em [r,g,b,alpha]. Tolera NaN/None/strings inválidas."""
-    try:
-        if not isinstance(hex_color, str):
-            return [153, 153, 153, alpha]  # cinza padrão
-        h = hex_color.strip().lstrip("#")
-        if len(h) == 3:  # #abc -> #aabbcc
-            h = "".join(ch * 2 for ch in h)
-        if len(h) != 6:
-            return [153, 153, 153, alpha]
-        r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
-        return [r, g, b, alpha]
-    except Exception:
-        return [153, 153, 153, alpha]
-
-
-
-SEQUENTIAL = {
-    4: ["#fee8d8", "#fdbb84", "#fc8d59", "#d7301f"],
-    5: ["#feedde", "#fdbe85", "#fd8d3c", "#e6550d", "#a63603"],
-    6: ["#feedde", "#fdd0a2", "#fdae6b", "#fd8d3c", "#e6550d", "#a63603"],
-    7: ["#fff5eb", "#fee6ce", "#fdd0a2", "#fdae6b", "#fd8d3c", "#e6550d", "#a63603"],
-    8: ["#fff5f0", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a", "#ef3b2c", "#cb181d", "#99000d"],
-}
-CATEGORICAL = [
-    "#7c3aed",
-    "#d946ef",
-    "#fb7185",
-    "#f97316",
-    "#f59e0b",
-    "#facc15",
-    "#fde047",
-    "#a16207",
-    "#9a3412",
-    "#b91c1c",
-    "#ea580c",
-    "#be185d",
-    "#9333ea",
-    "#6b21a8",
-    "#a21caf",
-    "#c026d3",
-    "#db2777",
-    "#e11d48",
-    "#eab308",
-    "#f43f5e",
-]
-
-
 def pick_sequential(n: int):
     n = max(4, min(8, n))
     return SEQUENTIAL.get(n, SEQUENTIAL[6])
@@ -928,37 +883,11 @@ def is_categorical(series: pd.Series) -> bool:
         return True
     return series.dropna().nunique() <= 12
 
-
-def ensure_wgs84(gdf):
-    try:
-        if hasattr(gdf, "crs") and gdf.crs and str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
-            return gdf.to_crs(4326)
-    except Exception:
-        pass
-    return gdf
-
-
-def make_geojson(gdf):
-    try:
-        import geopandas as gpd
-    except Exception:
-        raise RuntimeError("geopandas é necessário para montar GeoJSON.")
-
-    # Se não for GeoDataFrame, mas tiver coluna 'geometry', converte
-    if not isinstance(gdf, gpd.GeoDataFrame):
-        if "geometry" in getattr(gdf, "columns", []):
-            gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=getattr(gdf, "crs", 4326))
-        else:
-            raise RuntimeError("Objeto sem coluna 'geometry' para gerar GeoJSON.")
-    gdf = ensure_wgs84(gdf)
-    return json.loads(gdf.to_json())
-
 # ========= MAPA / LAYERS (pydeck) — substitui as versões antigas =========
-import re
 try:
     import pydeck as pdk
-except Exception as e:
-    raise RuntimeError("pydeck não está instalado. Rode: pip install pydeck") from e
+except Exception:
+    pdk = None  # fallback seguro; tratamos nas funções deck/osm
 
 def _layer_id(prefix: str, name: str) -> str:
     nm = re.sub(r"[^A-Za-z0-9_\-]+", "-", str(name)).strip("-") or "layer"
@@ -1026,17 +955,31 @@ def render_point_layer(geojson_obj, name="Points"):
 
 
 def deck(layers, satellite=False, initial_view_state=None):
-    token = st.secrets.get("mapbox", {}).get("token", None)
+    if pdk is None:
+        st.error("pydeck não está instalado. Instale com: pip install pydeck")
+        return
+    token = _secret(["mapbox", "token"])
     map_style = "mapbox://styles/mapbox/light-v11"
     if satellite:
         map_style = "mapbox://styles/mapbox/satellite-streets-v12"
     r = pdk.Deck(
         layers=layers,
-        initial_view_state=initial_view_state
-        or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
+        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
         map_style=map_style,
         api_keys={"mapbox": token} if token else None,
         tooltip={"text": "{name}\n{value}"},
+    )
+    st.pydeck_chart(r, use_container_width=True)
+
+def osm_basemap_deck(layers, initial_view_state=None):
+    if pdk is None:
+        st.error("pydeck não está instalado. Instale com: pip install pydeck")
+        return
+    tile = pdk.Layer("TileLayer", data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+    r = pdk.Deck(
+        layers=[tile] + layers,
+        initial_view_state=initial_view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
+        map_style=None,
     )
     st.pydeck_chart(r, use_container_width=True)
 
@@ -1971,9 +1914,23 @@ def render_ann_tab(
             st.error("A camada de quadras não possui coluna 'SQ'.")
             return
 
-        # --- NORMALIZAÇÃO DO JOIN (evita erro de tipos) ---
-        import re as re
+        dfp = df_pred[[sq_col, est_col, pred_col]].copy()
+        dfp.columns = ["SQ_raw", "estagio", "predicted"]
+        dfp["_SQ_norm"] = dfp["SQ_raw"].apply(_norm_sq_6)
         
+        geom_name = gdf_quadras.geometry.name
+        gdf_tmp = gdf_quadras[[sq_geo_col, geom_name]].copy()
+        gdf_tmp["_SQ_norm"] = gdf_tmp[sq_geo_col].apply(_norm_sq_6)
+        
+        gdf = gdf_tmp.merge(dfp[["_SQ_norm", "estagio", "predicted"]], on="_SQ_norm", how="left")
+        gdf = ensure_wgs84(gdf)
+        
+        # Paletas categóricas para as duas colunas
+        cmap_est_vals  = sorted(gdf["estagio"].dropna().astype(str).unique())
+        cmap_pred_vals = sorted(gdf["predicted"].dropna().astype(str).unique())
+        cmap_est  = {v: c for v, c in zip(cmap_est_vals,  pick_categorical(len(cmap_est_vals)))}
+        cmap_pred = {v: c for v, c in zip(cmap_pred_vals, pick_categorical(len(cmap_pred_vals)))}
+                
         # GeoJSONs com cores
         def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
             gj = make_geojson(gdf_in[[value_col, geom_name]].rename(columns={geom_name: "geometry"}))
@@ -2276,7 +2233,12 @@ with tab1:
             gdf_quadras = load_gpkg(repo, quadras_path_default, branch)
         except Exception as e:
             first_err = e
-            all_paths = github_tree_paths(repo, branch)
+            try:
+                all_paths = github_tree_paths(repo, branch)
+            except Exception as ee:
+                st.error(f"Erro ao listar árvore do repositório: {ee}\n"
+                         f"Falha original ao tentar ler '{quadras_path_default}': {first_err}")
+                st.stop()
             candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
             candidates = sorted(candidates, key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p)))
             if not candidates:
@@ -2761,32 +2723,6 @@ with tab2:
             key=f"dl_{safe_key}",
         )
 
-    # Paletas e utilitários simples de mapa (auto-contidos)
-    def hex_to_rgba(hex_color, alpha: int = 180):
-        try:
-            if not isinstance(hex_color, str):
-                return [153, 153, 153, alpha]
-            h = hex_color.strip().lstrip("#")
-            if len(h) == 3:
-                h = "".join(ch * 2 for ch in h)
-            if len(h) != 6:
-                return [153, 153, 153, alpha]
-            r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
-            return [r, g, b, alpha]
-        except Exception:
-            return [153, 153, 153, alpha]
-
-    CATEGORICAL = [
-        "#7c3aed", "#d946ef", "#fb7185", "#f97316", "#f59e0b", "#facc15",
-        "#fde047", "#a16207", "#9a3412", "#b91c1c", "#ea580c", "#be185d",
-        "#9333ea", "#6b21a8", "#a21caf", "#c026d3", "#db2777", "#e11d48",
-        "#eab308", "#f43f5e",
-    ]
-    def pick_categorical(k: int):
-        if k <= len(CATEGORICAL):
-            return CATEGORICAL[:k]
-        reps = (k // len(CATEGORICAL)) + 1
-        return (CATEGORICAL * reps)[:k]
 
     def _legend_row(hex_color: str, label: str):
         st.markdown(
@@ -2810,7 +2746,7 @@ with tab2:
             return
         view = pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10)
         map_style = None if not satellite else "mapbox://styles/mapbox/satellite-streets-v12"
-        if satellite and not st.secrets.get("mapbox", {}).get("token"):
+        if satellite and not token = _secret(["mapbox","token"]):
             st.info("Para o estilo Satélite, defina `st.secrets['mapbox']['token']`.")
         deck_obj = pdk.Deck(layers=layers, initial_view_state=view, map_style=map_style)
         st.pydeck_chart(deck_obj, use_container_width=True)
@@ -3097,7 +3033,7 @@ with tab2:
     st.markdown("### 🗺️ Mapa de clusterização")
     base_map_t2 = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="t2_base")
 
-    # Carrega quadras (mínimo) do repo (usa seu helper global load_gpkg/ensure_wgs84)
+    # Carrega quadras (mínimo) do repo (usa seu helper global load_gpkg/)
     @st.cache_data(show_spinner=True)
     def _load_quadras_min(ownerrepo, branch):
         gdf = st.session_state.get("gdf_quadras_cached")
@@ -3869,6 +3805,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
