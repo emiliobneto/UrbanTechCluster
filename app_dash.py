@@ -7,7 +7,6 @@ import re
 import json
 import tempfile
 from typing import Iterable
-
 import numpy as np
 import pandas as pd
 import requests
@@ -20,7 +19,6 @@ try:
          f_oneway as _anova_fn, kruskal as _kruskal_fn
 except Exception:  # SciPy ausente — funções ficam como None
     _spearman_fn = _shapiro_fn = _ttest_fn = _mw_fn = _anova_fn = _kruskal_fn = None
-
 
 # ==========================
 # SECRETS / GITHUB HEADERS
@@ -955,43 +953,77 @@ def make_geojson(gdf):
     gdf = ensure_wgs84(gdf)
     return json.loads(gdf.to_json())
 
+# ========= MAPA / LAYERS (pydeck) — substitui as versões antigas =========
+import re
+try:
+    import pydeck as pdk
+except Exception as e:
+    raise RuntimeError("pydeck não está instalado. Rode: pip install pydeck") from e
+
+def _layer_id(prefix: str, name: str) -> str:
+    nm = re.sub(r"[^A-Za-z0-9_\-]+", "-", str(name)).strip("-") or "layer"
+    return f"{prefix}-{nm}"
+
+def _as_geojson(obj):
+    """Aceita dict GeoJSON ou (Geo)DataFrame; converte quando preciso."""
+    if obj is None:
+        raise ValueError("GeoJSON vazio/nulo.")
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "geometry"):  # GeoDataFrame / DataFrame com geometry
+        return make_geojson(obj)
+    raise TypeError("Passe um dict GeoJSON ou um GeoDataFrame/DataFrame com geometry.")
+
 def render_geojson_layer(geojson_obj, name="Polygons"):
+    gj = _as_geojson(geojson_obj)
     return pdk.Layer(
         "GeoJsonLayer",
-        geojson_obj,
+        data=gj,
+        id=_layer_id("geojson", name),
+        pickable=True,
+        stroked=True,
+        filled=True,
+        extruded=False,
+        # Fallback de cor quando não houver properties.fill_color
+        get_fill_color="d => (d.properties && d.properties.fill_color) ? d.properties.fill_color : [153,153,153,150]",
+        get_line_color=[100, 100, 100, 220],
+        get_line_width=1,
+        line_width_min_pixels=1,
+        auto_highlight=True,
+    )
+
+def render_line_layer(geojson_obj, name="Lines"):
+    gj = _as_geojson(geojson_obj)
+    return pdk.Layer(
+        "GeoJsonLayer",
+        data=gj,
+        id=_layer_id("lines", name),
+        pickable=False,
+        stroked=True,
+        filled=False,
+        extruded=False,
+        get_line_color=[60, 60, 60, 220],
+        get_line_width=2,
+        line_width_min_pixels=1,
+    )
+
+def render_point_layer(geojson_obj, name="Points"):
+    gj = _as_geojson(geojson_obj)
+    return pdk.Layer(
+        "GeoJsonLayer",
+        data=gj,
+        id=_layer_id("points", name),
         pickable=True,
         stroked=False,
         filled=True,
         extruded=False,
-        get_fill_color="properties.fill_color",
-        get_line_color=[100, 100, 100],
-        get_line_width=0.5,
+        # Fallback de cor quando não houver properties.fill_color
+        get_fill_color="d => (d.properties && d.properties.fill_color) ? d.properties.fill_color : [17,138,178,180]",
+        get_point_radius=3,              # raio em metros; use *_min_pixels para garantir visibilidade
+        point_radius_min_pixels=2,
         auto_highlight=True,
     )
 
-
-def render_line_layer(geojson_obj, name="Lines"):
-    return pdk.Layer(
-        "GeoJsonLayer",
-        geojson_obj,
-        pickable=True,
-        stroked=True,
-        filled=False,
-        get_line_color=[30, 30, 30],
-        get_line_width=2,
-    )
-
-
-def render_point_layer(geojson_obj, name="Points"):
-    return pdk.Layer(
-        "GeoJsonLayer",
-        geojson_obj,
-        pickable=True,
-        point_type="circle",
-        get_fill_color="properties.fill_color",
-        get_point_radius=60,          # <- em GeoJsonLayer é get_point_radius
-        auto_highlight=True,
-    )
 
 def deck(layers, satellite=False, initial_view_state=None):
     token = st.secrets.get("mapbox", {}).get("token", None)
@@ -3837,5 +3869,6 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
