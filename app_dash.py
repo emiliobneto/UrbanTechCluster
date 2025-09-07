@@ -2479,7 +2479,7 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (mapas, métricas por cluster e testes) — REFEITA
+# ABA 2 — Clusterização (mapas, métricas por cluster e testes) — REFEITA (v2)
 # -----------------------------------------------------------------------------
 with tab2:
     import re as _re
@@ -2496,12 +2496,14 @@ with tab2:
             help="Usa centróides em vez de polígonos e pode amostrar feições para acelerar."
         )
     with perf_col2:
-        max_feat = st.slider("Máx. feições no mapa", 5_000, 80_000, 25_000, step=5_000, key="t2_maxfeat")
+        max_feat = st.slider("Máx. feições no mapa", 5_000, 80_000, 20_000, step=5_000, key="t2_maxfeat")
     with perf_col3:
-        max_vars = st.slider("Máx. variáveis por rodada (métricas)", 3, 60, 20, step=1, key="t2_maxvars")
+        max_vars = st.slider("Máx. variáveis por rodada (métricas)", 3, 60, 12, step=1, key="t2_maxvars")
 
     preload_toggle = st.toggle(
-        "⚡ Pré-carregar métricas por cluster×ano (cache)", value=True, key="t2_preload_cache",
+        "⚡ Pré-carregar métricas por cluster×ano (cache)",
+        value=False,  # ← padrão DESLIGADO
+        key="t2_preload_cache",
         help="Carrega e guarda em cache todas as métricas por cluster×ano logo no início."
     )
 
@@ -2549,7 +2551,7 @@ with tab2:
     # ==========
     colTopL, colTopR = st.columns([2, 1])
     with colTopL:
-        up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv","parquet"], key="t2_upl")
+        up = st.file_uploader("EstagioClusterizacao (opcional)", type=["csv", "parquet"], key="t2_upl")
     with colTopR:
         simplify_tol = st.slider(
             "Simplificação (°)", 0.0, 0.0008, 0.0002, 0.0001, key="t2_simplify",
@@ -2682,14 +2684,26 @@ with tab2:
         df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
 
     # ==========
-    # PRÉ-CARREGAMENTO (cache): métricas por cluster × ano
+    # PRÉ-CARREGAMENTO (cache): métricas por cluster × ano — FILTRADO PELO ANO
     # ==========
-    metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}"
+    # Reduz clusters ao ano selecionado para o cálculo (mais leve)
+    df_est_for_pre = df_est_raw
+    if ano_col_est and (year_sel is not None):
+        df_est_for_pre = df_est_raw[pd.to_numeric(df_est_raw[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
+
+    metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}|{year_sel}"
     df_metrics_all = st.session_state.get(metrics_key)
+
     if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
-        with st.spinner("Pré-carregando métricas por cluster×ano..."):
-            df_metrics_all = _preload_cluster_metrics_by_year(df_vals_raw, df_est_raw, cluster_col, chunk_size=max_vars)
-        st.session_state[metrics_key] = df_metrics_all
+        try:
+            with st.spinner("Pré-carregando métricas por cluster×ano..."):
+                df_metrics_all = _preload_cluster_metrics_by_year(
+                    df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
+                )
+            st.session_state[metrics_key] = df_metrics_all
+        except MemoryError:
+            st.warning("Pré-cálculo ficou pesado; desative o pré-carregamento ou reduza o número de variáveis.")
+            df_metrics_all = pd.DataFrame()
 
     # ======================
     # MAPA DE CLUSTERIZAÇÃO
@@ -2727,11 +2741,11 @@ with tab2:
             gj = make_geojson(gg)
             for feat in gj.get("features", []):
                 cl_raw = feat.get("properties", {}).get("_cl_code", None)
-                cl = _safe_int(cl_raw, {0,1,2,3})
+                cl = _safe_int(cl_raw, {0, 1, 2, 3})
                 hexc = palette[cl] if cl is not None else "#999999"
                 feat.setdefault("properties", {})
                 feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
-                feat["properties"]["name"]  = f"Cluster {cl}" if cl is not None else "Cluster indef."
+                feat["properties"]["name"] = f"Cluster {cl}" if cl is not None else "Cluster indef."
                 feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
             return gj
 
@@ -2795,9 +2809,12 @@ with tab2:
     st.subheader("📊 Métricas por cluster — univariadas")
 
     dfm = st.session_state.get(metrics_key)
-    if (dfm is None or dfm.empty) and isinstance(df_est_raw, pd.DataFrame):
-        with st.spinner("Calculando métricas por cluster×ano..."):
-            dfm = _preload_cluster_metrics_by_year(df_vals_raw, df_est_raw, cluster_col, chunk_size=max_vars)
+    if (dfm is None or dfm.empty):
+        with st.spinner("Calculando métricas para o ano selecionado..."):
+            try:
+                dfm = _preload_cluster_metrics_by_year(df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars)
+            except MemoryError:
+                dfm = pd.DataFrame()
         st.session_state[metrics_key] = dfm
 
     if dfm is None or dfm.empty:
@@ -2943,7 +2960,6 @@ with tab2:
         st.dataframe(piv_adv, use_container_width=True)
         download_df(piv_adv.reset_index(), "metricas_avancadas_por_cluster")
 
-        st.caption("Observação: colunas de cluster/estágio/classe/pred foram removidas das listas de variáveis elegíveis.")
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas & Testes (lado a lado com índice de significância)
@@ -3494,6 +3510,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
