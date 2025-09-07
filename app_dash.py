@@ -185,155 +185,155 @@ except Exception as e:
     st.error(f"Falha ao carregar quadras: {e}")
     st.stop()
 
-# ==========
-# ARQUIVO DE VALORES (por SQ) + filtro de ano coerente
-# ==========
-ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="t2_vals_ver")
-base_vals = pick_existing_dir(
-    repo, branch,
-    [f"Data/dados/{'originais' if ver_val=='originais' else 'winsorizados'}",
-     f"Data/dados/{'Originais' if ver_val=='originais' else 'Winsorizados'}",
-     f"Data/dados/{'winsorize' if ver_val!='originais' else 'originais'}"]
-)
-vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
-incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
-vals_files = [
-    f for f in vals_all
-    if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
-    and not re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
-]
-if not vals_files:
-    st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
-    st.stop()
-sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
-vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
-df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if str(vals_obj["name"]).endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
-
-sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
-if sq_col_vals is None:
-    st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
-    st.stop()
-ano_col_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
-if ano_col_vals and year_sel is not None:
-    df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
-
-# ==========
-# PRÉ-CARREGAMENTO (cache): métricas por cluster × ano — FILTRADO PELO ANO
-# ==========
-# Reduz clusters ao ano selecionado para o cálculo (mais leve)
-df_est_for_pre = df_est_raw
-if ano_col_est and (year_sel is not None):
-    df_est_for_pre = df_est_raw[pd.to_numeric(df_est_raw[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
-
-metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}|{year_sel}"
-df_metrics_all = st.session_state.get(metrics_key)
-
-if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
-    try:
-        with st.spinner("Pré-carregando métricas por cluster×ano..."):
-            df_metrics_all = _preload_cluster_metrics_by_year(
-                df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
-            )
-        st.session_state[metrics_key] = df_metrics_all
-    except MemoryError:
-        st.warning("Pré-cálculo ficou pesado; desative o pré-carregamento ou reduza o número de variáveis.")
-        df_metrics_all = pd.DataFrame()
-
-# ======================
-# MAPA DE CLUSTERIZAÇÃO
-# ======================
-st.markdown("### 🗺️ Mapa de clusterização")
-base_map_t2 = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="t2_base")
-view_mode = st.radio("Visualização do mapa", ["Mapa geral", "Recorte(s)"], index=0, horizontal=True, key="t2_view")
-
-gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
-if gdf_map.empty:
-    st.info("Não há feições para mapear após o JOIN de quadras × clusters.")
-else:
-    # amostragem para acelerar
-    if len(gdf_map) > max_feat:
-        gdf_map = gdf_map.sample(n=max_feat, random_state=42)
-
-    # simplificação opcional (só polígonos)
-    if (not fast_map) and simplify_tol and simplify_tol > 0:
+    # ==========
+    # ARQUIVO DE VALORES (por SQ) + filtro de ano coerente
+    # ==========
+    ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="t2_vals_ver")
+    base_vals = pick_existing_dir(
+        repo, branch,
+        [f"Data/dados/{'originais' if ver_val=='originais' else 'winsorizados'}",
+         f"Data/dados/{'Originais' if ver_val=='originais' else 'Winsorizados'}",
+         f"Data/dados/{'winsorize' if ver_val!='originais' else 'originais'}"]
+    )
+    vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
+    incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
+    vals_files = [
+        f for f in vals_all
+        if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
+        and not re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
+    ]
+    if not vals_files:
+        st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
+        st.stop()
+    sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
+    vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
+    df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if str(vals_obj["name"]).endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
+    
+    sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
+    if sq_col_vals is None:
+        st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
+        st.stop()
+    ano_col_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
+    if ano_col_vals and year_sel is not None:
+        df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
+    
+    # ==========
+    # PRÉ-CARREGAMENTO (cache): métricas por cluster × ano — FILTRADO PELO ANO
+    # ==========
+    # Reduz clusters ao ano selecionado para o cálculo (mais leve)
+    df_est_for_pre = df_est_raw
+    if ano_col_est and (year_sel is not None):
+        df_est_for_pre = df_est_raw[pd.to_numeric(df_est_raw[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
+    
+    metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}|{year_sel}"
+    df_metrics_all = st.session_state.get(metrics_key)
+    
+    if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
         try:
-            gdf_map = gdf_map.copy()
-            gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
-        except Exception:
-            pass
-
-    palette = pick_categorical(4)
-
-    def _geojson_colored(gdf_in, use_centroid: bool):
-        import geopandas as gpd
-        geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
-        gg = gpd.GeoDataFrame(
-            gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
-            geometry="geometry",
-            crs=getattr(gdf_in, "crs", 4326)
-        )
-        gj = make_geojson(gg)
-        for feat in gj.get("features", []):
-            cl_raw = feat.get("properties", {}).get("_cl_code", None)
-            cl = _safe_int(cl_raw, {0, 1, 2, 3})
-            hexc = palette[cl] if cl is not None else "#999999"
-            feat.setdefault("properties", {})
-            feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
-            feat["properties"]["name"] = f"Cluster {cl}" if cl is not None else "Cluster indef."
-            feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
-        return gj
-
-    def _draw_map(layers):
-        if base_map_t2.startswith("Satélite"):
-            deck(layers, satellite=True)
-        else:
-            osm_basemap_deck(layers)
-
-    if view_mode == "Mapa geral":
-        colL, colC, colR = st.columns([0.08, 0.84, 0.08])
-        with colC:
-            gj = _geojson_colored(gdf_map, use_centroid=fast_map)
-            lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
-            _draw_map([lyr])
-        st.markdown("**Legenda — clusters**")
-        for c in [0, 1, 2, 3]:
-            _legend_row(palette[c], label_map[c])
-
+            with st.spinner("Pré-carregando métricas por cluster×ano..."):
+                df_metrics_all = _preload_cluster_metrics_by_year(
+                    df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
+                )
+            st.session_state[metrics_key] = df_metrics_all
+        except MemoryError:
+            st.warning("Pré-cálculo ficou pesado; desative o pré-carregamento ou reduza o número de variáveis.")
+            df_metrics_all = pd.DataFrame()
+    
+    # ======================
+    # MAPA DE CLUSTERIZAÇÃO
+    # ======================
+    st.markdown("### 🗺️ Mapa de clusterização")
+    base_map_t2 = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="t2_base")
+    view_mode = st.radio("Visualização do mapa", ["Mapa geral", "Recorte(s)"], index=0, horizontal=True, key="t2_view")
+    
+    gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
+    if gdf_map.empty:
+        st.info("Não há feições para mapear após o JOIN de quadras × clusters.")
     else:
-        # Recortes lado a lado
-        rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
-        rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
-        if not rec_files:
-            st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
-        else:
-            rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2rec_file")
-            rec_obj = next(x for x in rec_files if x["name"] == rec_name)
-            gdfrec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
-
-            # interseção: pega só o que cai no recorte
+        # amostragem para acelerar
+        if len(gdf_map) > max_feat:
+            gdf_map = gdf_map.sample(n=max_feat, random_state=42)
+    
+        # simplificação opcional (só polígonos)
+        if (not fast_map) and simplify_tol and simplify_tol > 0:
             try:
-                import geopandas as gpd
-                gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
-                gq = ensure_wgs84(gq)
-                gr = ensure_wgs84(gdfrec)[["geometry"]]
-                sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
-                gdf_sub = gdf_map.loc[sel_idx].copy()
+                gdf_map = gdf_map.copy()
+                gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
             except Exception:
-                bbox = gdfrec.total_bounds
-                gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
-
-            gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
-            lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
-            lyr_brd = render_line_layer(make_geojson(gdfrec), "borda recorte")
-
-            c1, c2 = st.columns([1.6, 1], gap="large")
-            with c1:
-                _draw_map([lyr_sub, lyr_brd])
-            with c2:
-                st.markdown("**Legenda — clusters**")
-                for c in [0, 1, 2, 3]:
-                    _legend_row(palette[c], label_map[c])
-                st.metric("Feições no recorte", len(gdf_sub))
+                pass
+    
+        palette = pick_categorical(4)
+    
+        def _geojson_colored(gdf_in, use_centroid: bool):
+            import geopandas as gpd
+            geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
+            gg = gpd.GeoDataFrame(
+                gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
+                geometry="geometry",
+                crs=getattr(gdf_in, "crs", 4326)
+            )
+            gj = make_geojson(gg)
+            for feat in gj.get("features", []):
+                cl_raw = feat.get("properties", {}).get("_cl_code", None)
+                cl = _safe_int(cl_raw, {0, 1, 2, 3})
+                hexc = palette[cl] if cl is not None else "#999999"
+                feat.setdefault("properties", {})
+                feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
+                feat["properties"]["name"] = f"Cluster {cl}" if cl is not None else "Cluster indef."
+                feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
+            return gj
+    
+        def _draw_map(layers):
+            if base_map_t2.startswith("Satélite"):
+                deck(layers, satellite=True)
+            else:
+                osm_basemap_deck(layers)
+    
+        if view_mode == "Mapa geral":
+            colL, colC, colR = st.columns([0.08, 0.84, 0.08])
+            with colC:
+                gj = _geojson_colored(gdf_map, use_centroid=fast_map)
+                lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
+                _draw_map([lyr])
+            st.markdown("**Legenda — clusters**")
+            for c in [0, 1, 2, 3]:
+                _legend_row(palette[c], label_map[c])
+    
+        else:
+            # Recortes lado a lado
+            rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
+            rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
+            if not rec_files:
+                st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
+            else:
+                rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2rec_file")
+                rec_obj = next(x for x in rec_files if x["name"] == rec_name)
+                gdfrec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+    
+                # interseção: pega só o que cai no recorte
+                try:
+                    import geopandas as gpd
+                    gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
+                    gq = ensure_wgs84(gq)
+                    gr = ensure_wgs84(gdfrec)[["geometry"]]
+                    sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
+                    gdf_sub = gdf_map.loc[sel_idx].copy()
+                except Exception:
+                    bbox = gdfrec.total_bounds
+                    gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+    
+                gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
+                lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
+                lyr_brd = render_line_layer(make_geojson(gdfrec), "borda recorte")
+    
+                c1, c2 = st.columns([1.6, 1], gap="large")
+                with c1:
+                    _draw_map([lyr_sub, lyr_brd])
+                with c2:
+                    st.markdown("**Legenda — clusters**")
+                    for c in [0, 1, 2, 3]:
+                        _legend_row(palette[c], label_map[c])
+                    st.metric("Feições no recorte", len(gdf_sub))
 
 def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
         try:
@@ -3560,6 +3560,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
