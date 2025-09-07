@@ -2479,10 +2479,11 @@ with tab1:
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
 
 # -----------------------------------------------------------------------------
-# ABA 2 — Clusterização (mapas, métricas por cluster e testes) 
+# ABA 2 — Clusterização (mapas, métricas por cluster e testes) — REFEITA
 # -----------------------------------------------------------------------------
 with tab2:
     import re as _re
+
     st.subheader("🧬 Clusterização — Mapas, Métricas e Testes")
 
     # ======================
@@ -2505,7 +2506,7 @@ with tab2:
     )
 
     # ======================
-    # HELPERS LOCAIS
+    # HELPERS LOCAIS (seguros)
     # ======================
     @st.cache_data(show_spinner=False)
     def _norm_sq_series(s: pd.Series, digits: int = 6) -> pd.Series:
@@ -2523,6 +2524,16 @@ with tab2:
             pass
         m = _re.search(r"\d+", str(x))
         return int(m.group(0)) if m else None
+
+    def _safe_int(x, allowed: set[int] | None = None) -> int | None:
+        """int seguro; retorna None quando não der. Se 'allowed' for dado, exige pertinência."""
+        try:
+            xi = int(float(str(x).strip()))
+            if allowed and xi not in allowed:
+                return None
+            return xi
+        except Exception:
+            return None
 
     label_map = {
         0: "0 – Ausência de clusterização",
@@ -2546,33 +2557,40 @@ with tab2:
         )
 
     @st.cache_data(show_spinner=True, max_entries=4)
-    def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str]:
-        clusters_dir = pick_existing_dir(
-            repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
-        )
-        all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
-        # preferir EstagioClusterizacao.{csv|parquet}
-        cand = [f for f in all_in_dir if _re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", f["name"])]
-        if not cand:
-            cand = [f for f in all_in_dir if _re.search(r"(?i)estagio", f["name"]) and _re.search(r"(?i)cluster", f["name"])]
-        if not cand:
-            raise RuntimeError("Não encontrei `EstagioClusterizacao.{csv|parquet}` em Data/dados/Originais.")
-        est_file = cand[0]
-        df_est = load_parquet(repo, est_file["path"], branch) if est_file["name"].lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
-        source_label = f"{clusters_dir}/{est_file['name']}"
-        return df_est, source_label
+    def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
+        try:
+            clusters_dir = pick_existing_dir(
+                repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
+            )
+            all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
+            # preferir nome exato
+            cand = [f for f in all_in_dir if _re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", str(f["name"]))]
+            if not cand:
+                cand = [f for f in all_in_dir if _re.search(r"(?i)est[aá]gio", str(f["name"])) and _re.search(r"(?i)cluster", str(f["name"]))]
+            if not cand:
+                return None, "Não encontrei `EstagioClusterizacao.{csv|parquet}` em Data/dados/Originais."
+            est_file = cand[0]
+            df_est = load_parquet(repo, est_file["path"], branch) if str(est_file["name"]).lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
+            source_label = f"{clusters_dir}/{est_file['name']}"
+            return df_est, source_label
+        except Exception as e:
+            return None, f"Falha ao ler arquivo de clusters: {e}"
 
-    try:
-        if up is not None:
-            df_est_raw = pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up)
+    df_est_raw, source_label = (None, "")
+    if up is not None:
+        try:
+            df_est_raw = (pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up))
             source_label = f"(upload) {up.name}"
-        else:
-            df_est_raw, source_label = _load_clusters(repo, branch)
-    except Exception as e:
-        st.error(f"Falha ao carregar clusters: {e}")
+        except Exception as e:
+            st.error(f"Falha ao ler upload: {e}")
+    else:
+        df_est_raw, source_label = _load_clusters(repo, branch)
+
+    if not isinstance(df_est_raw, pd.DataFrame) or df_est_raw.empty:
+        st.error(f"Clusters indisponíveis. {source_label or ''}")
         st.stop()
 
-    # Ano + coluna de cluster
+    # Ano + coluna de cluster (robustos a tipos)
     ano_col_est = next((c for c in df_est_raw.columns if str(c).lower() == "ano"), None)
     anos_ok = None
     if ano_col_est:
@@ -2580,11 +2598,11 @@ with tab2:
         anos_ok = sorted(anos_vals.dropna().astype(int).unique().tolist()) or None
     year_sel = st.select_slider("Ano (clusters)", options=anos_ok or [None], value=(anos_ok[-1] if anos_ok else None), key="t2_year_sel")
 
-    cluster_cols = [c for c in df_est_raw.columns if _re.search(r"(?i)(cluster|est[aá]gio|label)", c)]
+    cluster_cols = [c for c in df_est_raw.columns if _re.search(r"(?i)(cluster|est[aá]gio|label)", str(c))]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
         st.stop()
-    preferred = next((c for c in cluster_cols if c.lower() == "estagioclusterizacao"), cluster_cols[0])
+    preferred = next((c for c in cluster_cols if str(c).lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="t2_cluster_col")
 
     # Normaliza/filtra clusters p/ JOIN
@@ -2623,10 +2641,10 @@ with tab2:
             gmin["_centroid"] = gmin.geometry.centroid
         except Exception:
             gmin["_centroid"] = gmin.geometry
-        return gmin
+        return gmin, sq_col
 
     try:
-        gdfq_min = _load_quadras_min(repo, branch)
+        gdfq_min, sq_col_quadras = _load_quadras_min(repo, branch)
     except Exception as e:
         st.error(f"Falha ao carregar quadras: {e}")
         st.stop()
@@ -2643,18 +2661,17 @@ with tab2:
     )
     vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
     incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
-    # nunca usar EstagioClusterizacao.* como arquivo de valores
     vals_files = [
         f for f in vals_all
-        if (incl_pred or not f["name"].lower().startswith("pred_"))
-        and not _re.search(r"(?i)estagio.*cluster", f["name"])
+        if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
+        and not _re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
     ]
     if not vals_files:
         st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
         st.stop()
     sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
     vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
-    df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if vals_obj["name"].endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
+    df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if str(vals_obj["name"]).endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
 
     sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
     if sq_col_vals is None:
@@ -2682,97 +2699,93 @@ with tab2:
     view_mode = st.radio("Visualização do mapa", ["Mapa geral", "Recorte(s)"], index=0, horizontal=True, key="t2_view")
 
     gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
-    # amostragem para acelerar
-    if len(gdf_map) > max_feat:
-        gdf_map = gdf_map.sample(n=max_feat, random_state=42)
-
-    # simplificação opcional (só polígonos)
-    if (not fast_map) and simplify_tol and simplify_tol > 0:
-        try:
-            gdf_map = gdf_map.copy()
-            gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
-        except Exception:
-            pass
-
-    palette = pick_categorical(4)
-
-
-    def _geojson_colored(gdf_in, use_centroid: bool):
-        import geopandas as gpd
-        geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
-    
-        # constrói um GeoDataFrame com a geometria correta ativada
-        gg = gpd.GeoDataFrame(
-            gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
-            geometry="geometry",
-            crs=getattr(gdf_in, "crs", 4326)
-        )
-        gj = make_geojson(gg)
-        for feat in gj.get("features", []):
-            cl = feat.get("properties", {}).get("_cl_code", None)
-            hexc = palette[int(cl)] if (cl in [0, 1, 2, 3]) else "#999999"
-            feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
-            feat["properties"]["name"] = f"Cluster {cl}"
-            feat["properties"]["value"] = label_map.get(int(cl), str(cl))
-        return gj
-
-
-    def _draw_map(layers):
-        if base_map_t2.startswith("Satélite"):
-            deck(layers, satellite=True)
-        else:
-            osm_basemap_deck(layers)
-
-    if view_mode == "Mapa geral":
-        colL, colC, colR = st.columns([0.08, 0.84, 0.08])
-        with colC:
-            gj = _geojson_colored(gdf_map, use_centroid=fast_map)
-            lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
-            _draw_map([lyr])
-        st.markdown("**Legenda — clusters**")
-        for c in [0, 1, 2, 3]:
-            _legend_row(palette[c], label_map[c])
-
+    if gdf_map.empty:
+        st.info("Não há feições para mapear após o JOIN de quadras × clusters.")
     else:
-        # Recortes lado a lado
-        rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
-        rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
-        if not rec_files:
-            st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
-        else:
-            rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2_rec_file")
-            rec_obj = next(x for x in rec_files if x["name"] == rec_name)
-            gdf_rec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+        # amostragem para acelerar
+        if len(gdf_map) > max_feat:
+            gdf_map = gdf_map.sample(n=max_feat, random_state=42)
 
-            # interseção: pega só o que cai no recorte
+        # simplificação opcional (só polígonos)
+        if (not fast_map) and simplify_tol and simplify_tol > 0:
             try:
-                import geopandas as gpd
-                gq = gdf_map[[gdf_map.geometry.name]].copy()
-                # assegura GeoDataFrame + CRS
-                gq = gpd.GeoDataFrame(gq, geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
-                gq = ensure_wgs84(gq)
-                
-                gr = ensure_wgs84(gdf_rec)[["geometry"]]
-                sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
-                gdf_sub = gdf_map.loc[sel_idx].copy()
-                sel_idx = gpd.sjoin(gq, ensure_wgs84(gdf_rec)[["geometry"]], predicate="intersects", how="inner").index.unique()
-                gdf_sub = gdf_map.loc[sel_idx].copy()
+                gdf_map = gdf_map.copy()
+                gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
             except Exception:
-                bbox = gdf_rec.total_bounds
-                gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+                pass
 
-            gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
-            lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
-            lyr_brd = render_line_layer(make_geojson(gdf_rec), "borda recorte")
+        palette = pick_categorical(4)
 
-            c1, c2 = st.columns([1.6, 1], gap="large")
-            with c1:
-                _draw_map([lyr_sub, lyr_brd])
-            with c2:
-                st.markdown("**Legenda — clusters**")
-                for c in [0, 1, 2, 3]:
-                    _legend_row(palette[c], label_map[c])
-                st.metric("Feições no recorte", len(gdf_sub))
+        def _geojson_colored(gdf_in, use_centroid: bool):
+            import geopandas as gpd
+            geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
+            gg = gpd.GeoDataFrame(
+                gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
+                geometry="geometry",
+                crs=getattr(gdf_in, "crs", 4326)
+            )
+            gj = make_geojson(gg)
+            for feat in gj.get("features", []):
+                cl_raw = feat.get("properties", {}).get("_cl_code", None)
+                cl = _safe_int(cl_raw, {0,1,2,3})
+                hexc = palette[cl] if cl is not None else "#999999"
+                feat.setdefault("properties", {})
+                feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
+                feat["properties"]["name"]  = f"Cluster {cl}" if cl is not None else "Cluster indef."
+                feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
+            return gj
+
+        def _draw_map(layers):
+            if base_map_t2.startswith("Satélite"):
+                deck(layers, satellite=True)
+            else:
+                osm_basemap_deck(layers)
+
+        if view_mode == "Mapa geral":
+            colL, colC, colR = st.columns([0.08, 0.84, 0.08])
+            with colC:
+                gj = _geojson_colored(gdf_map, use_centroid=fast_map)
+                lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
+                _draw_map([lyr])
+            st.markdown("**Legenda — clusters**")
+            for c in [0, 1, 2, 3]:
+                _legend_row(palette[c], label_map[c])
+
+        else:
+            # Recortes lado a lado
+            rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
+            rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
+            if not rec_files:
+                st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
+            else:
+                rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2_rec_file")
+                rec_obj = next(x for x in rec_files if x["name"] == rec_name)
+                gdf_rec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+
+                # interseção: pega só o que cai no recorte
+                try:
+                    import geopandas as gpd
+                    gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
+                    gq = ensure_wgs84(gq)
+                    gr = ensure_wgs84(gdf_rec)[["geometry"]]
+                    sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
+                    gdf_sub = gdf_map.loc[sel_idx].copy()
+                except Exception:
+                    bbox = gdf_rec.total_bounds
+                    gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+
+                gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
+                lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
+                lyr_brd = render_line_layer(make_geojson(gdf_rec), "borda recorte")
+
+                c1, c2 = st.columns([1.6, 1], gap="large")
+                with c1:
+                    _draw_map([lyr_sub, lyr_brd])
+                with c2:
+                    st.markdown("**Legenda — clusters**")
+                    for c in [0, 1, 2, 3]:
+                        _legend_row(palette[c], label_map[c])
+                    st.metric("Feições no recorte", len(gdf_sub))
 
     st.divider()
 
@@ -2782,7 +2795,7 @@ with tab2:
     st.subheader("📊 Métricas por cluster — univariadas")
 
     dfm = st.session_state.get(metrics_key)
-    if dfm is None or dfm.empty:
+    if (dfm is None or dfm.empty) and isinstance(df_est_raw, pd.DataFrame):
         with st.spinner("Calculando métricas por cluster×ano..."):
             dfm = _preload_cluster_metrics_by_year(df_vals_raw, df_est_raw, cluster_col, chunk_size=max_vars)
         st.session_state[metrics_key] = dfm
@@ -2792,21 +2805,19 @@ with tab2:
     else:
         anos_list = sorted([a for a in dfm["ano"].dropna().unique().tolist() if a is not None]) or [None]
         ano_uni = st.select_slider("Ano", options=anos_list, value=(anos_list[-1] if anos_list != [None] else None), key="t2_uni_ano")
-        if ano_uni is not None:
-            dfm = dfm[dfm["ano"] == ano_uni]
+        dfm_use = dfm[dfm["ano"] == ano_uni] if ano_uni is not None else dfm.copy()
 
         estat = st.radio("Estatística", ["Média", "Mediana"], horizontal=True, key="t2_uni_stat")
         stat_col = "media" if estat == "Média" else "mediana"
 
-        var_opts = sorted(dfm["variavel"].dropna().astype(str).unique().tolist())
-        # remove qualquer coluna de cluster/estágio/classe/pred
-        var_opts = [v for v in var_opts if not ban_re.search(v)]
+        var_opts = sorted(dfm_use["variavel"].dropna().astype(str).unique().tolist())
+        var_opts = [v for v in var_opts if not ban_re.search(str(v))]
         if not var_opts:
             st.info("Nenhuma variável numérica elegível encontrada (após remover colunas de cluster/estágio/classe/pred).")
         else:
             vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[: min(10, len(var_opts))], key="t2_uni_vars")
             if vars_sel:
-                sub = dfm[dfm["variavel"].isin(vars_sel)].copy()
+                sub = dfm_use[dfm_use["variavel"].isin(vars_sel)].copy()
                 piv = (
                     sub.pivot_table(index="cluster_label", columns="variavel", values=stat_col, aggfunc="first")
                        .reindex([
@@ -2849,91 +2860,90 @@ with tab2:
     )
     if not vars_sel_adv:
         st.info("Selecione ao menos uma variável para os testes.")
-        st.stop()
-    if len(vars_sel_adv) > max_vars:
-        st.warning(f"Você selecionou {len(vars_sel_adv)} variáveis. Processando apenas as {max_vars} primeiras.")
-        vars_sel_adv = vars_sel_adv[:max_vars]
+    else:
+        if len(vars_sel_adv) > max_vars:
+            st.warning(f"Você selecionou {len(vars_sel_adv)} variáveis. Processando apenas as {max_vars} primeiras.")
+            vars_sel_adv = vars_sel_adv[:max_vars]
 
-    # JOIN leve valores × clusters
-    df_vals_use = df_vals_raw[[sq_col_vals] + vars_sel_adv].copy()
-    df_vals_use["_SQ_norm"] = _norm_sq_series(df_vals_use[sq_col_vals])
-    df_join = df_vals_use.merge(df_est_clean, on="_SQ_norm", how="inner")
-    df_join = df_join[df_join["_cl_code"].isin([0, 1, 2, 3])].copy()
+        # JOIN leve valores × clusters
+        df_vals_use = df_vals_raw[[sq_col_vals] + vars_sel_adv].copy()
+        df_vals_use["_SQ_norm"] = _norm_sq_series(df_vals_use[sq_col_vals])
+        df_join = df_vals_use.merge(df_est_clean, on="_SQ_norm", how="inner")
+        df_join = df_join[df_join["_cl_code"].isin([0, 1, 2, 3])].copy()
 
-    # fallback local caso _compute_descritiva_fast não esteja definido globalmente
-    def _compute_descritiva_fallback(df_join: pd.DataFrame, vars_list: list[str], use_shapiro: bool, shapiro_max_n: int = 5000) -> pd.DataFrame:
-        d = df_join[["_cl_code"] + vars_list].copy()
-        for v in vars_list:
-            d[v] = pd.to_numeric(d[v], errors="coerce")
-        g = d.groupby("_cl_code", observed=True)
-        def _to_long(name, df_):
-            return df_.stack().rename(name).reset_index().rename(columns={"_cl_code": "cluster", "level_1": "variavel"})
-        count_df = g[vars_list].count()
-        n_total = g.size()
-        miss_df = pd.DataFrame(n_total.values[:, None] - count_df.values, index=count_df.index, columns=vars_list)
-        mean_df   = g[vars_list].mean()
-        median_df = g[vars_list].median()
-        std_df    = g[vars_list].std(ddof=1)
-        min_df    = g[vars_list].min()
-        max_df    = g[vars_list].max()
-        q_df      = g[vars_list].quantile([0.25, 0.75])
-        p25_df    = q_df.xs(0.25, level=1); p75_df = q_df.xs(0.75, level=1)
-        cv_df     = std_df / mean_df
-        parts = [
-            _to_long("n", count_df), _to_long("missings", miss_df), _to_long("media", mean_df),
-            _to_long("mediana", median_df), _to_long("desvio_padrao", std_df),
-            _to_long("p25", p25_df), _to_long("p75", p75_df),
-            _to_long("minimo", min_df), _to_long("maximo", max_df), _to_long("coef_var", cv_df),
-        ]
-        out = parts[0]
-        for p in parts[1:]:
-            out = out.merge(p, on=["cluster", "variavel"], how="left")
-        out["cluster_label"] = out["cluster"].map(label_map)
-        # Shapiro opcional (p por cluster/variável)
-        out["shapiro_p"] = np.nan; out["shapiro_sig"] = ""
-        if use_shapiro:
-            try:
-                from scipy.stats import shapiro as _shapiro_fn
-            except Exception:
-                _shapiro_fn = None
-            if _shapiro_fn is not None:
-                rng = np.random.default_rng(42)
-                for cl, sub in d.groupby("_cl_code", observed=True):
-                    arr = sub[vars_list].to_numpy(dtype=float)
-                    for j, v in enumerate(vars_list):
-                        col = arr[:, j]; col = col[np.isfinite(col)]
-                        n = col.size
-                        if n < 3: continue
-                        if n > shapiro_max_n:
-                            idx = rng.choice(n, size=shapiro_max_n, replace=False)
-                            col = col[idx]
-                        try:
-                            p = float(_shapiro_fn(col).pvalue)
-                        except Exception:
-                            p = np.nan
-                        mask = (out["cluster"] == cl) & (out["variavel"] == v)
-                        out.loc[mask, "shapiro_p"] = p
-                def _sig_index(p):
-                    if not np.isfinite(p): return ""
-                    return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns")))
-                out["shapiro_sig"] = out["shapiro_p"].apply(_sig_index)
-        return out
+        # fallback local caso _compute_descritiva_fast falhe
+        def _compute_descritiva_fallback(df_join: pd.DataFrame, vars_list: list[str], use_shapiro: bool, shapiro_max_n: int = 5000) -> pd.DataFrame:
+            d = df_join[["_cl_code"] + vars_list].copy()
+            for v in vars_list:
+                d[v] = pd.to_numeric(d[v], errors="coerce")
+            g = d.groupby("_cl_code", observed=True)
+            def _to_long(name, df_):
+                return df_.stack().rename(name).reset_index().rename(columns={"_cl_code": "cluster", "level_1": "variavel"})
+            count_df = g[vars_list].count()
+            n_total = g.size()
+            miss_df = pd.DataFrame(n_total.values[:, None] - count_df.values, index=count_df.index, columns=vars_list)
+            mean_df   = g[vars_list].mean()
+            median_df = g[vars_list].median()
+            std_df    = g[vars_list].std(ddof=1)
+            min_df    = g[vars_list].min()
+            max_df    = g[vars_list].max()
+            q_df      = g[vars_list].quantile([0.25, 0.75])
+            p25_df    = q_df.xs(0.25, level=1); p75_df = q_df.xs(0.75, level=1)
+            cv_df     = std_df / mean_df
+            parts = [
+                _to_long("n", count_df), _to_long("missings", miss_df), _to_long("media", mean_df),
+                _to_long("mediana", median_df), _to_long("desvio_padrao", std_df),
+                _to_long("p25", p25_df), _to_long("p75", p75_df),
+                _to_long("minimo", min_df), _to_long("maximo", max_df), _to_long("coef_var", cv_df),
+            ]
+            out = parts[0]
+            for p in parts[1:]:
+                out = out.merge(p, on=["cluster", "variavel"], how="left")
+            out["cluster_label"] = out["cluster"].map(label_map)
+            # Shapiro opcional
+            out["shapiro_p"] = np.nan; out["shapiro_sig"] = ""
+            if use_shapiro:
+                try:
+                    from scipy.stats import shapiro as _shapiro_fn_local
+                except Exception:
+                    _shapiro_fn_local = None
+                if _shapiro_fn_local is not None:
+                    rng = np.random.default_rng(42)
+                    for cl, sub in d.groupby("_cl_code", observed=True):
+                        arr = sub[vars_list].to_numpy(dtype=float)
+                        for j, v in enumerate(vars_list):
+                            col = arr[:, j]; col = col[np.isfinite(col)]
+                            n = col.size
+                            if n < 3: continue
+                            if n > shapiro_max_n:
+                                idx = rng.choice(n, size=shapiro_max_n, replace=False)
+                                col = col[idx]
+                            try:
+                                p = float(_shapiro_fn_local(col).pvalue)
+                            except Exception:
+                                p = np.nan
+                            mask = (out["cluster"] == cl) & (out["variavel"] == v)
+                            out.loc[mask, "shapiro_p"] = p
+                    def _sig_index(p):
+                        if not np.isfinite(p): return ""
+                        return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns")))
+                    out["shapiro_sig"] = out["shapiro_p"].apply(_sig_index)
+            return out
 
-    try:
-        df_desc = _compute_descritiva_fast(df_join, tuple(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)  # type: ignore
-    except Exception:
-        df_desc = _compute_descritiva_fallback(df_join, list(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)
+        try:
+            df_desc = _compute_descritiva_fast(df_join, tuple(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)  # type: ignore
+        except Exception:
+            df_desc = _compute_descritiva_fallback(df_join, list(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)
 
-    # Exibição da descritiva avançada
-    st.markdown("**Descritivas por cluster (0–3)**")
-    piv_adv = (
-        df_desc.pivot_table(index=["cluster_label", "variavel"], values=["media", "mediana", "desvio_padrao", "minimo", "p25", "p75", "maximo", "coef_var"], aggfunc="first")
-                .sort_index()
-    )
-    st.dataframe(piv_adv, use_container_width=True)
-    download_df(piv_adv.reset_index(), "metricas_avancadas_por_cluster")
+        st.markdown("**Descritivas por cluster (0–3)**")
+        piv_adv = (
+            df_desc.pivot_table(index=["cluster_label", "variavel"], values=["media", "mediana", "desvio_padrao", "minimo", "p25", "p75", "maximo", "coef_var"], aggfunc="first")
+                  .sort_index()
+        )
+        st.dataframe(piv_adv, use_container_width=True)
+        download_df(piv_adv.reset_index(), "metricas_avancadas_por_cluster")
 
-    st.caption("Observação: colunas de cluster/estágio/classe/pred foram removidas das listas de variáveis elegíveis.")
+        st.caption("Observação: colunas de cluster/estágio/classe/pred foram removidas das listas de variáveis elegíveis.")
 
 # -----------------------------------------------------------------------------
 # ABA 3 — Univariadas & Testes (lado a lado com índice de significância)
@@ -3484,6 +3494,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
