@@ -1095,7 +1095,6 @@ def pairs_to_matrix(df_pairs, i_col, j_col, val_col, sym_max=True):
         m = m.combine_first(m.T)
         m = pd.DataFrame(np.maximum(m.values, m.T.values), index=m.index, columns=m.columns)
     return m
-s st
 
 # --------------------------------------------------------------------------------------
 # Tab 4 — ANN: métricas, relatórios e mapas (Data/ANN)
@@ -3838,4 +3837,5 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
