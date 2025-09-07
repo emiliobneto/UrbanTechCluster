@@ -447,7 +447,6 @@ def resolve_branch(owner_repo: str, user_branch: str | None):
             return b
     info = github_repo_info(owner_repo)
     return info.get("default_branch", "main")
-)
 
 def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
     ownerrepo = normalizerepo(ownerrepo).strip("/")
@@ -3560,6 +3559,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
