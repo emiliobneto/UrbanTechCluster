@@ -2100,7 +2100,7 @@ with tab2:
         s2 = s2.mask(s2.eq(""))  # None para vazios
         return s2
 
-    @st.cache_data(show_spinner=False)
+    
     def _vector_to_geojson(gdf_min: "pd.DataFrame") -> dict:
         # assume colunas: geometry + fill_color + cluster_lbl
         # propriedades mínimas para reduzir tamanho
@@ -2168,7 +2168,7 @@ with tab2:
         df = df.sort_values(["_SQ_norm","_cl_code"]).drop_duplicates("_SQ_norm", keep="last")
         return df[["_SQ_norm", cluster_col, "_cl_code"]].reset_index(drop=True)
 
-    @st.cache_data(show_spinner=False, max_entries=10)
+    
     def _attach_colors_min(df_joined: pd.DataFrame, cluster_col: str) -> tuple[pd.DataFrame, list, dict]:
         # rótulos categóricos + paleta
         df = df_joined.copy()
@@ -2184,7 +2184,7 @@ with tab2:
         df["cluster_lbl"] = pd.Categorical(df["cluster_lbl"], categories=cats_sorted, ordered=True)
         return df, cats_sorted, cmap
 
-    @st.cache_data(show_spinner=False, max_entries=6)
+    
     def _simplify_geom_cached(gdf_in, tol: float, use_centroid: bool, max_feat: int, use_rec_mask: set | None):
         # reduz colunas e geometrias; aplica recorte e amostra
         if use_centroid:
@@ -3182,6 +3182,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
