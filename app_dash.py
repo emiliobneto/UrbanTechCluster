@@ -3455,18 +3455,17 @@ def render_tab3():
 
 # ---------------- Helpers específicos da aba ----------------
     def _sig_stars(p_or_q: float) -> str:
-    """Índice de significância em estrelas."""
-    try:
+        try:
         x = float(p_or_q)
-    except Exception:
+        except Exception:
+            return "ns"
+        if not np.isfinite(x):
+            return "ns"
+        if x < 0.001: return "****"
+        if x < 0.01:  return "***"
+        if x < 0.05:  return "**"
+        if x < 0.10:  return "•"
         return "ns"
-    if not np.isfinite(x):
-        return "ns"
-    if x < 0.001: return "****"
-    if x < 0.01:  return "***"
-    if x < 0.05:  return "**"
-    if x < 0.10:  return "•"
-    return "ns"
 
     def _first_col_like(df: pd.DataFrame, patterns: list[str]) -> str | None:
         cols = list(df.columns)
@@ -3977,6 +3976,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
