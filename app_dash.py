@@ -2862,12 +2862,6 @@ with tab2:
         )
 
     @st.cache_data(show_spinner=True, max_entries=4)
-    
-    # ==========
-    # QUADRAS mínimas (geometrias)
-    # ==========
-    @st.cache_data(show_spinner=True, max_entries=2)
-    st.divider()
 
     # ==========================
     # 2.1) Métricas por cluster — univariadas (AGREGADAS pelo estágio)
@@ -3559,6 +3553,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
