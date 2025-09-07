@@ -50,6 +50,24 @@ TITLE = (
 )
 st.title(TITLE)
 
+# --- Definição precoce de repo/branch (antes de QUALQUER uso) ---
+with st.sidebar:
+    st.header("🔗 Fonte dos Dados (GitHub)")
+    repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster", key="repo_input")
+    branch_input = st.text_input("branch (vazio = auto)", value="", key="branch_input")
+
+try:
+    repo = normalize_repo(repo_input)     # <- define repo aqui
+    branch = resolve_branch(repo, branch_input)  # <- e o branch aqui
+    st.session_state["repo"] = repo
+    st.session_state["branch"] = branch
+    st.sidebar.caption(f"Usando: **{repo}@{branch}**")
+except Exception as e:
+    st.error(f"Configuração inválida: {e}")
+    st.stop()
+
+if not repo or not branch:
+    st.stop()
 
 # ==========================
 # GITHUB I/O HELPERS
@@ -3976,6 +3994,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
