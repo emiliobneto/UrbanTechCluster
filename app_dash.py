@@ -2399,6 +2399,12 @@ with tab2:
     # ==========================
     st.subheader("🧪 Métricas avançadas — cluster (0–3)")
 
+
+    use_shapiro = st.checkbox("Calcular Shapiro por cluster (mais lento)", value=False, key="t2_shapiro")
+    shapiro_cap = st.slider("Máx. amostras por Shapiro (cap)", 500, 10000, 5000, 500, key="t2_shapiro_cap")
+    df_desc = _compute_descritiva_fast(df_join, tuple(vars_sel_adv), use_shapiro, shapiro_max_n=shapiro_cap)
+
+    
     try:
         from scipy.stats import spearmanr as _spearman_fn, shapiro as _shapiro_fn, ttest_ind as _ttest_fn, mannwhitneyu as _mw_fn, f_oneway as _anova_fn, kruskal as _kruskal_fn
     except Exception:
@@ -2510,127 +2516,276 @@ with tab2:
 
     # ---------- DESCRITIVA ----------
     @st.cache_data(show_spinner=True, max_entries=12)
-    def _compute_descritiva(df_join: pd.DataFrame, vars_list: tuple, use_shapiro: bool) -> pd.DataFrame:
-        rows=[]
+    def _compute_descritiva_fast(
+        df_join: pd.DataFrame,
+        vars_list: tuple[str, ...],
+        use_shapiro: bool,
+        shapiro_max_n: int = 5000,
+        random_state: int = 42,
+    ) -> pd.DataFrame:
+        """Descritiva por cluster 0–3, vetorizada (sem loops), com Shapiro opcional."""
+        vars_list = list(vars_list)
+        d = df_join[["_cl_code"] + vars_list].copy()
         for v in vars_list:
-            g = df_join[["_cl_code", v]]
-            for c_ in [0,1,2,3]:
-                s_all = g.loc[g["_cl_code"]==c_, v]; n_total = int(s_all.shape[0])
-                s = s_all.dropna(); n=int(s.shape[0]); miss=n_total-n
-                if n==0:
-                    rows.append({"variavel":v,"cluster":c_,"n":0,"missings":miss,"media":np.nan,"mediana":np.nan,
-                                 "desvio_padrao":np.nan,"p25":np.nan,"p75":np.nan,"minimo":np.nan,"maximo":np.nan,
-                                 "coef_var":np.nan,"shapiro_p":np.nan,"shapiro_sig":""})
-                    continue
-                mu=float(s.mean()); med=float(s.median()); sd=float(s.std(ddof=1))
-                p25=float(np.percentile(s,25)); p75=float(np.percentile(s,75)); mn=float(s.min()); mx=float(s.max())
-                cv=(sd/mu) if (np.isfinite(sd) and np.isfinite(mu) and abs(mu)>1e-15) else np.nan
-                if use_shapiro and _shapiro_fn is not None and n>=3:
-                    try: sh_p=float(_shapiro_fn(s).pvalue)
-                    except Exception: sh_p=np.nan
-                else:
-                    sh_p=np.nan
-                rows.append({"variavel":v,"cluster":c_,"n":n,"missings":miss,"media":mu,"mediana":med,"desvio_padrao":sd,
-                             "p25":p25,"p75":p75,"minimo":mn,"maximo":mx,"coef_var":cv,"shapiro_p":sh_p,"shapiro_sig":_sig_index(sh_p)})
-        out=pd.DataFrame(rows); out["cluster_label"]=out["cluster"].map(label_map); return out
-
-    use_shapiro = st.checkbox("Calcular Shapiro por cluster (mais lento)", value=False, key="t2_shapiro")
-    df_desc = _compute_descritiva(df_join, tuple(vars_sel_adv), use_shapiro)
-    st.markdown("**Descritiva por cluster (0–3)**")
-    st.caption("Índice: *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
-    st.dataframe(df_desc, use_container_width=True)
-    download_df(df_desc, f"descritiva_por_cluster_{ver_val}{'_'+str(year_sel) if year_sel is not None else ''}")
-
-    # ---------- OMNIBUS + CORRELAÇÕES ----------
+            d[v] = pd.to_numeric(d[v], errors="coerce")
+    
+        g = d.groupby("_cl_code", observed=True)
+    
+        n_total = g.size()
+        count_df = g[vars_list].count()
+        miss_df = pd.DataFrame(
+            n_total.values[:, None] - count_df.values,
+            index=count_df.index,
+            columns=vars_list,
+        )
+    
+        mean_df   = g[vars_list].mean()
+        median_df = g[vars_list].median()
+        std_df    = g[vars_list].std(ddof=1)
+        min_df    = g[vars_list].min()
+        max_df    = g[vars_list].max()
+        q_df      = g[vars_list].quantile([0.25, 0.75])
+        p25_df    = q_df.xs(0.25, level=1)
+        p75_df    = q_df.xs(0.75, level=1)
+        cv_df     = std_df / mean_df
+    
+        def _to_long(name, df_):
+            return (
+                df_.stack()
+                   .rename(name)
+                   .reset_index()
+                   .rename(columns={"_cl_code": "cluster", "level_1": "variavel"})
+            )
+    
+        parts = [
+            _to_long("n",         count_df),
+            _to_long("missings",  miss_df),
+            _to_long("media",     mean_df),
+            _to_long("mediana",   median_df),
+            _to_long("desvio_padrao", std_df),
+            _to_long("p25",       p25_df),
+            _to_long("p75",       p75_df),
+            _to_long("minimo",    min_df),
+            _to_long("maximo",    max_df),
+            _to_long("coef_var",  cv_df),
+        ]
+        out = parts[0]
+        for p in parts[1:]:
+            out = out.merge(p, on=["cluster", "variavel"], how="left")
+    
+        # Shapiro (opcional, com cap)
+        out["shapiro_p"] = np.nan
+        out["shapiro_sig"] = ""
+        if use_shapiro and _shapiro_fn is not None:
+            rng = np.random.default_rng(random_state)
+            for cl, sub in d.groupby("_cl_code", observed=True):
+                arr = sub[vars_list].to_numpy(dtype=float)
+                for j, v in enumerate(vars_list):
+                    col = arr[:, j]
+                    col = col[np.isfinite(col)]
+                    n = col.size
+                    if n < 3:
+                        continue
+                    if n > shapiro_max_n:
+                        idx = rng.choice(n, size=shapiro_max_n, replace=False)
+                        col = col[idx]
+                    try:
+                        p = float(_shapiro_fn(col).pvalue)
+                    except Exception:
+                        p = np.nan
+                    mask = (out["cluster"] == cl) & (out["variavel"] == v)
+                    out.loc[mask, "shapiro_p"] = p
+    
+            def _sig_index(p):
+                if not np.isfinite(p): return ""
+                return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns")))
+            out["shapiro_sig"] = out["shapiro_p"].apply(_sig_index)
+    
+        out["cluster_label"] = out["cluster"].map({
+            0: "0 – Ausência de clusterização",
+            1: "1 – Cluster em estágio inicial",
+            2: "2 – Cluster em formação",
+            3: "3 – Clusterizado",
+        })
+        return out
+    
+    
     @st.cache_data(show_spinner=True, max_entries=12)
-    def _compute_omnibus(df_join: pd.DataFrame, vars_list: tuple) -> pd.DataFrame:
-        rows=[]
+    def _compute_omnibus_fast(
+        df_join: pd.DataFrame,
+        vars_list: tuple[str, ...],
+        calc_gini: bool = False,
+    ) -> pd.DataFrame:
+        """ANOVA/Kruskal por variável + correlações com o código do cluster, em bloco."""
+        vars_list = list(vars_list)
+        d = df_join[["_cl_code"] + vars_list].copy()
         for v in vars_list:
-            d = df_join[["_cl_code", v]].dropna()
-            if d.empty:
-                rows.append({"variavel":v,"n_total":0,"anova_F":np.nan,"anova_p":np.nan,"eta2":np.nan,
-                             "kruskal_H":np.nan,"kruskal_p":np.nan,"spearman_rho":np.nan,"spearman_p":np.nan,
-                             "gini_corr":np.nan,"r2_simple":np.nan})
-                continue
-            x0=d.loc[d["_cl_code"]==0, v].to_numpy()
-            x1=d.loc[d["_cl_code"]==1, v].to_numpy()
-            x2=d.loc[d["_cl_code"]==2, v].to_numpy()
-            x3=d.loc[d["_cl_code"]==3, v].to_numpy()
-            groups=[x0,x1,x2,x3]
-            # ANOVA
-            if _anova_fn is not None and sum(len(x) for x in groups)>=4:
-                try: Fv,pA=_anova_fn(*groups); Fv=float(Fv); pA=float(pA)
-                except Exception: Fv,pA=np.nan,np.nan
+            d[v] = pd.to_numeric(d[v], errors="coerce")
+    
+        code = d["_cl_code"].astype(float)
+        X = d[vars_list]
+    
+        pearson_r  = X.corrwith(code, method="pearson")
+        spearman_r = X.corrwith(code, method="spearman")
+        r2_simple  = (pearson_r ** 2).rename("r2_simple")
+    
+        # p de Spearman (loop leve)
+        if _spearman_fn is not None:
+            spearman_p = []
+            for v in vars_list:
+                x = pd.to_numeric(d[v], errors="coerce")
+                try:
+                    _, p = _spearman_fn(x, code, nan_policy="omit")
+                    spearman_p.append(float(p))
+                except Exception:
+                    spearman_p.append(np.nan)
+        else:
+            spearman_p = [np.nan] * len(vars_list)
+    
+        # arrays por cluster (reuso)
+        groups = {}
+        for c in [0, 1, 2, 3]:
+            sub = d.loc[d["_cl_code"] == c, vars_list].to_numpy(dtype=float)
+            groups[c] = sub
+    
+        rows = []
+        for j, v in enumerate(vars_list):
+            g = [groups[c][:, j] for c in [0, 1, 2, 3]]
+            g = [arr[np.isfinite(arr)] for arr in g]
+            n_total = int(sum(len(arr) for arr in g))
+    
+            if _anova_fn is not None and n_total >= 4:
+                try:
+                    Fv, pA = _anova_fn(*g)
+                    Fv, pA = float(Fv), float(pA)
+                except Exception:
+                    Fv, pA = np.nan, np.nan
             else:
-                Fv,pA=np.nan,np.nan
-            eta2=_eta_squared(groups)
-            # Kruskal
+                Fv, pA = np.nan, np.nan
+    
             if _kruskal_fn is not None:
-                try: Hv,pK=_kruskal_fn(*[g for g in groups if len(g)>0]); Hv=float(Hv); pK=float(pK)
-                except Exception: Hv,pK=np.nan,np.nan
+                non_empty = [arr for arr in g if len(arr)]
+                try:
+                    Hv, pK = _kruskal_fn(*non_empty) if len(non_empty) >= 2 else (np.nan, np.nan)
+                    Hv, pK = float(Hv), float(pK)
+                except Exception:
+                    Hv, pK = np.nan, np.nan
             else:
-                Hv,pK=np.nan,np.nan
-            x=d[v].to_numpy(); c=d["_cl_code"].to_numpy()
-            if _spearman_fn is not None and len(d)>=3:
-                try: rho,pS=_spearman_fn(x,c, nan_policy="omit"); rho=float(rho); pS=float(pS)
-                except Exception: rho=d[v].corr(d["_cl_code"], method="spearman"); pS=np.nan
+                Hv, pK = np.nan, np.nan
+    
+            eta2 = _eta_squared(g)
+    
+            if calc_gini:
+                try:
+                    gini = _gini_corr(pd.to_numeric(d[v], errors="coerce"), code)
+                except Exception:
+                    gini = np.nan
             else:
-                rho=d[v].corr(d["_cl_code"], method="spearman"); pS=np.nan
-            gini=_gini_corr(x,c); r2s=_r2_simple(x,c)
-            rows.append({"variavel":v,"n_total":int(len(d)),"anova_F":Fv,"anova_p":pA,"eta2":eta2,
-                         "kruskal_H":Hv,"kruskal_p":pK,"spearman_rho":rho,"spearman_p":pS,
-                         "gini_corr":gini,"r2_simple":r2s})
-        out=pd.DataFrame(rows)
-        out["anova_sig"]=out["anova_p"].apply(_sig_index)
-        out["kruskal_sig"]=out["kruskal_p"].apply(_sig_index)
-        out["spearman_sig"]=out["spearman_p"].apply(_sig_index)
+                gini = np.nan
+    
+            rows.append({
+                "variavel": v,
+                "n_total": n_total,
+                "anova_F": Fv, "anova_p": pA,
+                "eta2": eta2,
+                "kruskal_H": Hv, "kruskal_p": pK,
+                "spearman_rho": float(spearman_r.get(v, np.nan)),
+                "spearman_p":  float(spearman_p[j]),
+                "gini_corr": gini,
+                "r2_simple":  float(r2_simple.get(v, np.nan)),
+            })
+    
+        out = pd.DataFrame(rows)
+        def _sig_index(p):
+            if not np.isfinite(p): return ""
+            return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns")))
+        out["anova_sig"]    = out["anova_p"].apply(_sig_index)
+        out["kruskal_sig"]  = out["kruskal_p"].apply(_sig_index)
+        out["spearman_sig"] = out["spearman_p"].apply(_sig_index)
         return out
 
-    df_omni = _compute_omnibus(df_join, tuple(vars_sel_adv))
-    st.markdown("**Omnibus (ANOVA/Kruskal) e correlações vs cluster**")
-    st.caption("Índice: *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
-    st.dataframe(df_omni, use_container_width=True)
-    download_df(df_omni, f"omnibus_correlacoes_{ver_val}{'_'+str(year_sel) if year_sel is not None else ''}")
 
-    # ---------- PAR-A-PAR ----------
     @st.cache_data(show_spinner=True, max_entries=12)
-    def _compute_pairs(df_join: pd.DataFrame, vars_list: tuple) -> pd.DataFrame:
-        pairs=[(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)]
-        rows=[]
+    def _compute_pairs_fast(
+        df_join: pd.DataFrame,
+        vars_list: tuple[str, ...],
+    ) -> pd.DataFrame:
+        """Comparações par-a-par (Welch t-test, Mann–Whitney, d de Cohen, Cliff’s Δ) com pré-split por cluster."""
+        vars_list = list(vars_list)
+        d = df_join[["_cl_code"] + vars_list].copy()
         for v in vars_list:
-            g = df_join[["_cl_code", v]].dropna()
-            for a,b in pairs:
-                xa=g.loc[g["_cl_code"]==a, v].to_numpy(); xb=g.loc[g["_cl_code"]==b, v].to_numpy()
-                nA,nB=len(xa),len(xb)
-                muA=float(np.mean(xa)) if nA else np.nan; muB=float(np.mean(xb)) if nB else np.nan
-                medA=float(np.median(xa)) if nA else np.nan; medB=float(np.median(xb)) if nB else np.nan
-                if _ttest_fn is not None and nA>=2 and nB>=2:
-                    try: t_stat,p_t=_ttest_fn(xa,xb, equal_var=False); t_stat=float(t_stat); p_t=float(p_t)
-                    except Exception: t_stat,p_t=np.nan,np.nan
+            d[v] = pd.to_numeric(d[v], errors="coerce")
+    
+        arrays = {c: d.loc[d["_cl_code"] == c, vars_list].to_numpy(dtype=float) for c in [0, 1, 2, 3]}
+        pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+    
+        rows = []
+        for a, b in pairs:
+            A = arrays[a]; B = arrays[b]
+            for j, v in enumerate(vars_list):
+                xa = A[:, j]; xa = xa[np.isfinite(xa)]
+                xb = B[:, j]; xb = xb[np.isfinite(xb)]
+                nA, nB = xa.size, xb.size
+                muA = float(np.mean(xa)) if nA else np.nan
+                muB = float(np.mean(xb)) if nB else np.nan
+                medA = float(np.median(xa)) if nA else np.nan
+                medB = float(np.median(xb)) if nB else np.nan
+    
+                if _ttest_fn is not None and nA >= 2 and nB >= 2:
+                    try:
+                        t_stat, p_t = _ttest_fn(xa, xb, equal_var=False)
+                        t_stat, p_t = float(t_stat), float(p_t)
+                    except Exception:
+                        t_stat, p_t = np.nan, np.nan
                 else:
-                    t_stat,p_t=np.nan,np.nan
-                if _mw_fn is not None and nA>=1 and nB>=1:
-                    try: U,p_mw=_mw_fn(xa,xb, alternative="two-sided"); U=float(U); p_mw=float(p_mw)
-                    except Exception: U,p_mw=np.nan,np.nan
+                    t_stat, p_t = np.nan, np.nan
+    
+                if _mw_fn is not None and nA >= 1 and nB >= 1:
+                    try:
+                        U, p_mw = _mw_fn(xa, xb, alternative="two-sided")
+                        U, p_mw = float(U), float(p_mw)
+                    except Exception:
+                        U, p_mw = np.nan, np.nan
                 else:
-                    U,p_mw=np.nan,np.nan
-                d=_cohens_d(xa,xb); cd=_cliffs_delta(xa,xb)
-                rows.append({"variavel":v,"par":f"{a} vs {b}","cluster_A":a,"cluster_B":b,
-                             "n_A":nA,"n_B":nB,"media_A":muA,"media_B":muB,"mediana_A":medA,"mediana_B":medB,
-                             "t_stat":t_stat,"p_t":p_t,"U":U,"p_mw":p_mw,"cohens_d":d,"cliffs_delta":cd})
-        out=pd.DataFrame(rows)
+                    U, p_mw = np.nan, np.nan
+    
+                d_eff = _cohens_d(xa, xb)
+                cd    = _cliffs_delta(xa, xb)
+    
+                rows.append({
+                    "variavel": v,
+                    "par": f"{a} vs {b}",
+                    "cluster_A": a, "cluster_B": b,
+                    "n_A": nA, "n_B": nB,
+                    "media_A": muA, "media_B": muB,
+                    "mediana_A": medA, "mediana_B": medB,
+                    "t_stat": t_stat, "p_t": p_t,
+                    "U": U, "p_mw": p_mw,
+                    "cohens_d": d_eff, "cliffs_delta": cd,
+                })
+    
+        out = pd.DataFrame(rows)
         if "p_t" in out.columns:
-            out["p_t_fdr_bh"]=_bh_fdr(out["p_t"]); out["t_sig"]=out["p_t"].apply(_sig_index); out["t_sig_fdr"]=out["p_t_fdr_bh"].apply(_sig_index)
+            out["p_t_fdr_bh"] = _bh_fdr(out["p_t"])
+            out["t_sig"]      = out["p_t"].apply(lambda p: "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns"))))
+            out["t_sig_fdr"]  = out["p_t_fdr_bh"].apply(lambda p: "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns"))))
         if "p_mw" in out.columns:
-            out["p_mw_fdr_bh"]=_bh_fdr(out["p_mw"]); out["mw_sig"]=out["p_mw"].apply(_sig_index); out["mw_sig_fdr"]=out["p_mw_fdr_bh"].apply(_sig_index)
-        out["cluster_A_label"]=out["cluster_A"].map(label_map); out["cluster_B_label"]=out["cluster_B"].map(label_map)
+            out["p_mw_fdr_bh"] = _bh_fdr(out["p_mw"])
+            out["mw_sig"]      = out["p_mw"].apply(lambda p: "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns"))))
+            out["mw_sig_fdr"]  = out["p_mw_fdr_bh"].apply(lambda p: "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ("•" if p < 0.10 else "ns"))))
+        out["cluster_A_label"] = out["cluster_A"].map({
+            0: "0 – Ausência de clusterização",
+            1: "1 – Cluster em estágio inicial",
+            2: "2 – Cluster em formação",
+            3: "3 – Clusterizado",
+        })
+        out["cluster_B_label"] = out["cluster_B"].map({
+            0: "0 – Ausência de clusterização",
+            1: "1 – Cluster em estágio inicial",
+            2: "2 – Cluster em formação",
+            3: "3 – Clusterizado",
+        })
         return out
-
-    df_pw = _compute_pairs(df_join, tuple(vars_sel_adv))
-    st.markdown("**Comparações par-a-par entre clusters (0–3)**")
-    st.caption("Índice (p e q=FDR-BH): *** p<0,001; ** p<0,01; * p<0,05; • p<0,10; ns ≥0,10.")
-    st.dataframe(df_pw, use_container_width=True)
-    download_df(df_pw, f"comparacoes_par_a_par_{ver_val}{'_'+str(year_sel) if year_sel is not None else ''}")
 
 
 # -----------------------------------------------------------------------------
@@ -3182,6 +3337,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
