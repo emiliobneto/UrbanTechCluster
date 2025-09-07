@@ -57,8 +57,8 @@ with st.sidebar:
     branch_input = st.text_input("branch (vazio = auto)", value="", key="branch_input")
 
 try:
-    repo = normalize_repo(repo_input)     # <- define repo aqui
-    branch = resolve_branch(repo, branch_input)  # <- e o branch aqui
+    repo = normalize_repo(repo_input)
+    branch = resolve_branch(repo, branch_input)
     st.session_state["repo"] = repo
     st.session_state["branch"] = branch
     st.sidebar.caption(f"Usando: **{repo}@{branch}**")
@@ -443,7 +443,7 @@ def normalize_repo(owner_repo: str) -> str:
     s = s.strip("/")
     parts = [p for p in s.split("/") if p]
     if len(parts) < 2:
-        raise RuntimeError("Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechCluster'")
+        raise RuntimeError("Informe no formato 'owner/repo' (ex.: emiliobneto/UrbanTechCluster)")
     return f"{parts[0]}/{parts[1]}"
 
 @st.cache_data(show_spinner=True)
@@ -3994,33 +3994,3 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
