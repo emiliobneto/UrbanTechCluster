@@ -58,13 +58,12 @@ API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
     # cluster como código 0..3 quando possível
-    import re as _re
     def _to_int_code(x):
         try:
             v = float(str(x).strip())
             if np.isfinite(v) and abs(v-int(v))<1e-9: return int(v)
         except Exception: pass
-        m = _re.search(r"\d+", str(x))
+        m = re.search(r"\d+", str(x))
         return int(m.group(0)) if m else None
     est["_cl_code"] = est[cluster_col].map(_to_int_code).astype("Int64")
 
@@ -201,7 +200,7 @@ RAW_BASE = "https://raw.githubusercontent.com"
     vals_files = [
         f for f in vals_all
         if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
-        and not _re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
+        and not re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
     ]
     if not vals_files:
         st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
@@ -307,25 +306,25 @@ RAW_BASE = "https://raw.githubusercontent.com"
             if not rec_files:
                 st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
             else:
-                rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2_rec_file")
+                rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2rec_file")
                 rec_obj = next(x for x in rec_files if x["name"] == rec_name)
-                gdf_rec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+                gdfrec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
 
                 # interseção: pega só o que cai no recorte
                 try:
                     import geopandas as gpd
                     gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
                     gq = ensure_wgs84(gq)
-                    gr = ensure_wgs84(gdf_rec)[["geometry"]]
+                    gr = ensure_wgs84(gdfrec)[["geometry"]]
                     sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
                     gdf_sub = gdf_map.loc[sel_idx].copy()
                 except Exception:
-                    bbox = gdf_rec.total_bounds
+                    bbox = gdfrec.total_bounds
                     gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
 
                 gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
                 lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
-                lyr_brd = render_line_layer(make_geojson(gdf_rec), "borda recorte")
+                lyr_brd = render_line_layer(make_geojson(gdfrec), "borda recorte")
 
                 c1, c2 = st.columns([1.6, 1], gap="large")
                 with c1:
@@ -343,9 +342,9 @@ def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
             )
             all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
             # preferir nome exato
-            cand = [f for f in all_in_dir if _re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", str(f["name"]))]
+            cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", str(f["name"]))]
             if not cand:
-                cand = [f for f in all_in_dir if _re.search(r"(?i)est[aá]gio", str(f["name"])) and _re.search(r"(?i)cluster", str(f["name"]))]
+                cand = [f for f in all_in_dir if re.search(r"(?i)est[aá]gio", str(f["name"])) and re.search(r"(?i)cluster", str(f["name"]))]
             if not cand:
                 return None, "Não encontrei `EstagioClusterizacao.{csv|parquet}` em Data/dados/Originais."
             est_file = cand[0]
@@ -377,7 +376,7 @@ def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
         anos_ok = sorted(anos_vals.dropna().astype(int).unique().tolist()) or None
     year_sel = st.select_slider("Ano (clusters)", options=anos_ok or [None], value=(anos_ok[-1] if anos_ok else None), key="t2_year_sel")
 
-    cluster_cols = [c for c in df_est_raw.columns if _re.search(r"(?i)(cluster|est[aá]gio|label)", str(c))]
+    cluster_cols = [c for c in df_est_raw.columns if re.search(r"(?i)(cluster|est[aá]gio|label)", str(c))]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
         st.stop()
@@ -402,7 +401,7 @@ def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
     )
 
 def _norm_sq_6(x):
-            s = _re.sub(r"\D", "", str(x)) if x is not None else ""
+            s = re.sub(r"\D", "", str(x)) if x is not None else ""
             if s == "": return None
             if len(s) > 6: s = s[-6:]
             return s.zfill(6)
@@ -519,8 +518,8 @@ def download_plotly_png(fig, base_name: str, width_px: int = 2400, height_px: in
         html = fig.to_html(include_plotlyjs="cdn")
         st.download_button("💾 Baixar HTML interativo", html, file_name=f"{base_name}.html", mime="text/html")
 
-def normalize_repo(owner_repo: str) -> str:
-    s = (owner_repo or "").strip()
+def normalizerepo(ownerrepo: str) -> str:
+    s = (ownerrepo or "").strip()
     s = s.replace("https://github.com/", "").replace("http://github.com/", "")
     s = s.strip("/")
     parts = [p for p in s.split("/") if p]
@@ -532,36 +531,36 @@ def normalize_repo(owner_repo: str) -> str:
 
 
 @st.cache_data(show_spinner=True)
-def github_repo_info(owner_repo: str):
-    owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}"
+def githubrepo_info(ownerrepo: str):
+    ownerrepo = normalizerepo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
+        raise RuntimeError(f"Falha lendo repo {ownerrepo}: {r.status_code} {r.text}")
     return r.json()
 
-def resolve_branch(owner_repo: str, user_branch: str | None):
-    owner_repo = normalize_repo(owner_repo)
+def resolve_branch(ownerrepo: str, user_branch: str | None):
+    ownerrepo = normalizerepo(ownerrepo)
     b = (user_branch or "").strip()
     if b:
-        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
+        url = f"{API_BASE}/repos/{ownerrepo}/branches/{b}"
         r = requests.get(url, headers=_gh_headers(), timeout=60)
         if r.status_code == 200:
             return b
-    info = github_repo_info(owner_repo)
+    info = githubrepo_info(ownerrepo)
     return info.get("default_branch", "main")
 
 
-def build_raw_url(owner_repo: str, path: str, branch: str) -> str:
-    owner_repo = normalize_repo(owner_repo).strip("/")
+def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
+    ownerrepo = normalizerepo(ownerrepo).strip("/")
     path = path.lstrip("/")
-    return f"{RAW_BASE}/{owner_repo}/{branch}/{path}"
+    return f"{RAW_BASE}/{ownerrepo}/{branch}/{path}"
 
 
 @st.cache_data(show_spinner=False)
-def github_listdir(owner_repo: str, path: str, branch: str):
-    owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
+def github_listdir(ownerrepo: str, path: str, branch: str):
+    ownerrepo = normalizerepo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
         return []
@@ -569,9 +568,9 @@ def github_listdir(owner_repo: str, path: str, branch: str):
 
 
 @st.cache_data(show_spinner=True)
-def github_get_contents(owner_repo: str, path: str, branch: str):
-    owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}/contents/{path}?ref={branch}"
+def github_get_contents(ownerrepo: str, path: str, branch: str):
+    ownerrepo = normalizerepo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
@@ -579,9 +578,9 @@ def github_get_contents(owner_repo: str, path: str, branch: str):
 
 
 @st.cache_data(show_spinner=True)
-def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
-    meta = github_get_contents(owner_repo, path, branch)
-    download_url = meta.get("download_url") or build_raw_url(owner_repo, path, branch)
+def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
+    meta = github_get_contents(ownerrepo, path, branch)
+    download_url = meta.get("download_url") or build_raw_url(ownerrepo, path, branch)
     r = requests.get(download_url, headers=_gh_headers(), timeout=180)
     if r.status_code != 200:
         ct = r.headers.get("Content-Type", "")
@@ -602,12 +601,12 @@ def github_fetch_bytes(owner_repo: str, path: str, branch: str) -> bytes:
 
 
 @st.cache_data(show_spinner=True)
-def load_gpkg(owner_repo: str, path: str, branch: str, layer: str | None = None):
+def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
     try:
         import geopandas as gpd
     except Exception as e:
         raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
-    blob = github_fetch_bytes(owner_repo, path, branch)
+    blob = github_fetch_bytes(ownerrepo, path, branch)
     import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
@@ -626,18 +625,18 @@ def load_gpkg(owner_repo: str, path: str, branch: str, layer: str | None = None)
 
 
 @st.cache_data(show_spinner=True)
-def load_parquet(owner_repo: str, path: str, branch: str) -> pd.DataFrame:
-    blob = github_fetch_bytes(owner_repo, path, branch)
+def load_parquet(ownerrepo: str, path: str, branch: str) -> pd.DataFrame:
+    blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
 
 
 @st.cache_data(show_spinner=True)
-def load_csv(owner_repo, path, branch) -> pd.DataFrame:
-    blob = github_fetch_bytes(owner_repo, path, branch)
+def load_csv(ownerrepo, path, branch) -> pd.DataFrame:
+    blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_csv(io.BytesIO(blob), usecols=lambda c: not str(c).startswith("Unnamed"))
 
-def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
-    items = github_listdir(owner_repo, path, branch)
+def list_files(ownerrepo: str, path: str, branch: str, exts=(".parquet", ".csv", ".gpkg")):
+    items = github_listdir(ownerrepo, path, branch)
     out = []
     for it in items:
         if isinstance(it, dict) and it.get("type") == "file":
@@ -648,9 +647,9 @@ def list_files(owner_repo: str, path: str, branch: str, exts=(".parquet", ".csv"
 
 
 @st.cache_data(show_spinner=True)
-def github_branch_info(owner_repo: str, branch: str):
-    owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}/branches/{branch}"
+def github_branch_info(ownerrepo: str, branch: str):
+    ownerrepo = normalizerepo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}/branches/{branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text}")
@@ -658,10 +657,10 @@ def github_branch_info(owner_repo: str, branch: str):
 
 
 @st.cache_data(show_spinner=True)
-def github_tree_paths(owner_repo: str, branch: str):
-    info = github_branch_info(owner_repo, branch)
+def github_tree_paths(ownerrepo: str, branch: str):
+    info = github_branch_info(ownerrepo, branch)
     tree_sha = info["commit"]["commit"]["tree"]["sha"]
-    url = f"{API_BASE}/repos/{normalize_repo(owner_repo)}/git/trees/{tree_sha}?recursive=1"
+    url = f"{API_BASE}/repos/{normalizerepo(ownerrepo)}/git/trees/{tree_sha}?recursive=1"
     r = requests.get(url, headers=_gh_headers(), timeout=180)
     if r.status_code != 200:
         raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
@@ -669,13 +668,13 @@ def github_tree_paths(owner_repo: str, branch: str):
     return [ent["path"] for ent in tree if ent.get("type") == "blob"]
 
 
-def pick_existing_dir(owner_repo: str, branch: str, candidates: list[str]) -> str:
+def pick_existing_dir(ownerrepo: str, branch: str, candidates: list[str]) -> str:
     """Tenta encontrar diretório existente (case-insensitive / alternativas)."""
     for cand in candidates:
-        items = github_listdir(owner_repo, cand, branch)
+        items = github_listdir(ownerrepo, cand, branch)
         if items:
             return cand
-    all_paths = github_tree_paths(owner_repo, branch)
+    all_paths = github_tree_paths(ownerrepo, branch)
     for cand in candidates:
         key = cand.strip("/").lower()
         for p in all_paths:
@@ -1203,12 +1202,12 @@ def render_legend_numeric(bins, palette, title="Legenda"):
 # FUNÇÕES AUXILIARES DE BUSCA/EXIBIÇÃO (tabelas prontas)
 # ==========================
 
-def find_files_by_patterns(owner_repo, branch, base_dirs, patterns=(), exts=(".csv", ".parquet")):
+def find_files_by_patterns(ownerrepo, branch, base_dirs, patterns=(), exts=(".csv", ".parquet")):
     """Procura arquivos dentro de múltiplos diretórios candidatos filtrando por padrões (substring/regex simples)."""
     found = []
     for base in base_dirs:
-        base_dir = pick_existing_dir(owner_repo, branch, [base])
-        for f in list_files(owner_repo, base_dir, branch, exts):
+        base_dir = pick_existing_dir(ownerrepo, branch, [base])
+        for f in list_files(ownerrepo, base_dir, branch, exts):
             name_low = f["name"].lower()
             ok = True if not patterns else any(re.search(p, name_low) for p in patterns)
             if ok:
@@ -1216,10 +1215,10 @@ def find_files_by_patterns(owner_repo, branch, base_dirs, patterns=(), exts=(".c
     return found
 
 
-def load_tabular(owner_repo, path, branch):
+def load_tabular(ownerrepo, path, branch):
     if path.lower().endswith(".parquet"):
-        return load_parquet(owner_repo, path, branch)
-    return load_csv(owner_repo, path, branch)
+        return load_parquet(ownerrepo, path, branch)
+    return load_csv(ownerrepo, path, branch)
 
 
 def pairs_to_matrix(df_pairs, i_col, j_col, val_col, sym_max=True):
@@ -1327,8 +1326,8 @@ def _maybe_float(s):
         return np.nan
 
 
-def _parse_classification_report_text(text: str) -> pd.DataFrame:
-    """Extrai tabela do classification_report (texto sklearn)."""
+def _parse_classificationreport_text(text: str) -> pd.DataFrame:
+    """Extrai tabela do classificationreport (texto sklearn)."""
     lines = [l for l in text.splitlines() if l.strip()]
     rows = []
     for ln in lines:
@@ -1405,7 +1404,7 @@ def _safe_literal_list(x):
         return []
 
 
-def _render_variancia_file(df: pd.DataFrame):
+def render_variancia_file(df: pd.DataFrame):
     cols = {c.lower(): c for c in df.columns}
     col_group = cols.get("grupo") or cols.get("grupos") or None
     col_evr = (
@@ -1478,7 +1477,7 @@ def _render_variancia_file(df: pd.DataFrame):
     download_df(df_plot, "pca_variancia_tabela")
 
 
-def _render_pipeline_file(df: pd.DataFrame):
+def render_pipeline_file(df: pd.DataFrame):
     first_col = df.columns[0]
     if df[first_col].astype(str).str.lower().head(5).isin(["pca", "imputer", "scaler", "cols", "k"]).any():
         df2 = df.set_index(first_col)
@@ -1574,7 +1573,7 @@ def _prep_scores(df: pd.DataFrame):
     return pc_cols, id_col, ano_col
 
 
-def _render_evr_section(df_evr: pd.DataFrame):
+def render_evr_section(df_evr: pd.DataFrame):
     cols = {c.lower(): c for c in df_evr.columns}
     if "explained_variance_ratio" in cols:
         evr_col = cols["explained_variance_ratio"]
@@ -1618,7 +1617,7 @@ def _render_evr_section(df_evr: pd.DataFrame):
     st.dataframe(df, use_container_width=True)
 
 
-def _render_loadings_section(df_load: pd.DataFrame):
+def render_loadings_section(df_load: pd.DataFrame):
     long = _tidy_loadings(df_load)
     if long.empty:
         st.warning("Não foi possível identificar a estrutura de *loadings* deste arquivo.")
@@ -1646,7 +1645,7 @@ def _render_loadings_section(df_load: pd.DataFrame):
     st.dataframe(sub.drop(columns=["abs_loading"]), use_container_width=True)
 
 
-def _render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
+def render_scores_section(df_scores: pd.DataFrame, repo, branch, pick_existing_dir, list_files, load_parquet, load_csv):
     pc_cols, id_col, ano_col = _prep_scores(df_scores)
     if not pc_cols:
         st.warning("Arquivo de *scores* sem colunas de PCs identificáveis.")
@@ -1702,7 +1701,7 @@ def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parq
 
     kind_evr = _classify_pca_file(df_evr)
     if kind_evr == "evr":
-        _render_variancia_file(df_evr)
+        render_variancia_file(df_evr)
     else:
         st.warning("Este arquivo não parece conter variância explicada. Exibindo preview:")
         st.dataframe(df_evr.head(), use_container_width=True)
@@ -1725,7 +1724,7 @@ def render_pca_tab_inline(repo, branch, pick_existing_dir, list_files, load_parq
 
     kind_pipe = _classify_pca_file(df_pipe)
     if kind_pipe == "pipeline":
-        _render_pipeline_file(df_pipe)
+        render_pipeline_file(df_pipe)
     else:
         st.info("Arquivo não reconhecido como pipeline. Exibindo preview:")
         st.dataframe(df_pipe.head(), use_container_width=True)
@@ -1956,7 +1955,7 @@ def render_ann_tab(
     # ==================================================================================
     st.markdown("### 🧾 Classification report")
     df_cr_raw = _load_if_exists_in(
-        repo, branch, list_files, load_csv, ann_base, ["classification_report.txt", "classification_report.json"]
+        repo, branch, list_files, load_csv, ann_base, ["classificationreport.txt", "classificationreport.json"]
     )
     if isinstance(df_cr_raw, pd.DataFrame) and not df_cr_raw.empty:
         if "__raw_json__" in df_cr_raw.columns:
@@ -1967,7 +1966,7 @@ def render_ann_tab(
                 df_cr = pd.json_normalize(data)
         elif "__raw__" in df_cr_raw.columns:
             text = df_cr_raw["__raw__"].iloc[0]
-            df_cr = _parse_classification_report_text(text)
+            df_cr = _parse_classificationreport_text(text)
         else:
             df_cr = df_cr_raw.copy()
         if not df_cr.empty and "label" in df_cr.columns:
@@ -1976,9 +1975,9 @@ def render_ann_tab(
                 fig = px.bar(df_cr[df_cr["label"].str.lower() != "accuracy"], x="label", y="f1", title="F1-score por classe")
                 st.plotly_chart(fig, use_container_width=True, key=f"plt_cls_{run_sel or 'root'}")
         else:
-            st.info("Não consegui extrair a tabela do classification_report.")
+            st.info("Não consegui extrair a tabela do classificationreport.")
     else:
-        st.info("classification_report (txt/json) não encontrado nesta execução.")
+        st.info("classificationreport (txt/json) não encontrado nesta execução.")
 
     # ==================================================================================
     # 4) Testes de hipótese
@@ -2081,7 +2080,7 @@ def render_ann_tab(
             return
 
         # --- NORMALIZAÇÃO DO JOIN (evita erro de tipos) ---
-        import re as _re
+        import re as re
         
         # GeoJSONs com cores
         def _geojson_with_fill(gdf_in: pd.DataFrame, value_col: str, cmap: dict):
@@ -2248,9 +2247,9 @@ def render_ann_tab(
                     y_pred = "Predicted_Class"
     
                 # probas: prob_*, proba_* ou P(...)
-                import re as _re
+                import re as re
                 prob_cols = [c for c in df_meta.columns
-                             if c.lower().startswith(("prob_", "proba_")) or _re.match(r"^p\(.+\)$", c.lower())]
+                             if c.lower().startswith(("prob_", "proba_")) or re.match(r"^p\(.+\)$", c.lower())]
     
                 # ---- Matriz de confusão (se tivermos y_true e y_pred)
                 if y_true and y_pred:
@@ -2312,7 +2311,7 @@ with st.sidebar:
     repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster")
     branch_input = st.text_input("branch (vazio = auto)", value="")
     try:
-        repo = normalize_repo(repo_input)
+        repo = normalizerepo(repo_input)
         branch = resolve_branch(repo, branch_input)
         st.caption(f"Usando: **{repo}@{branch}**")
     except Exception as e:
@@ -2457,7 +2456,7 @@ with tab1:
     # ---------------- Definição da variável e do modo de coloração (3ª coluna) ----------------
     # Regra:
     # - Se a 3ª coluna for 'str':
-    #     * Se tiver 1 único valor (ex.: "pred_renda") e existir uma coluna numérica com esse nome => usar essa coluna numérica
+    #     * Se tiver 1 único valor (ex.: "predrenda") e existir uma coluna numérica com esse nome => usar essa coluna numérica
     #     * Caso contrário => usar a própria 3ª coluna como classificação (categórica) e montar a legenda a partir dela
     # - Fallback: escolher manualmente uma variável numérica
     third_col = df_vars.columns[2] if len(df_vars.columns) >= 3 else None
@@ -2643,16 +2642,16 @@ with tab1:
             colR0, colR1 = st.columns([4, 2], gap="large")
 
             with colR0:
-                rec_sel_name = st.selectbox("Arquivo de recorte (.gpkg)", [f["name"] for f in recorte_files], index=0, key="t1_rec_file")
+                rec_sel_name = st.selectbox("Arquivo de recorte (.gpkg)", [f["name"] for f in recorte_files], index=0, key="t1rec_file")
                 rec_obj = next(x for x in recorte_files if x["name"] == rec_sel_name)
                 recorte_file_path = rec_obj["path"]
-                gdf_rec = load_gpkg(repo, recorte_file_path, branch)
+                gdfrec = load_gpkg(repo, recorte_file_path, branch)
 
                 # Interseção dos SQs com o recorte
                 try:
                     import geopandas as gpd
                     gq = ensure_wgs84(gdf_quadras[[sq_col_quadras, "geometry"]].copy())
-                    gr = ensure_wgs84(gdf_rec[["geometry"]].copy())
+                    gr = ensure_wgs84(gdfrec[["geometry"]].copy())
                     try:
                         sq_sel = gpd.sjoin(gq, gr, predicate="intersects", how="inner")[sq_col_quadras].unique().tolist()
                     except Exception:
@@ -2663,37 +2662,37 @@ with tab1:
                     sq_sel = []
 
                 # Subconjunto colorido para o recorte usando a MESMA variável/legenda do mapa geral
-                gdf_color_rec = gdf[gdf[sq_col_quadras].isin(sq_sel)].copy()
-                gj_rec_fill = make_geojson(gdf_color_rec)
-                for feat in gj_rec_fill.get("features", []):
+                gdf_colorrec = gdf[gdf[sq_col_quadras].isin(sq_sel)].copy()
+                gjrec_fill = make_geojson(gdf_colorrec)
+                for feat in gjrec_fill.get("features", []):
                     val = feat.get("properties", {}).get("value", None)
                     hexc = cmap.get(val, "#999999")
                     feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
 
                 # Camadas: preenchido + contorno do recorte
-                layers_rec = [render_geojson_layer(gj_rec_fill, name="recorte_fill"),
-                              render_line_layer(make_geojson(gdf_rec), name="recorte_borda")]
+                layersrec = [render_geojson_layer(gjrec_fill, name="recorte_fill"),
+                              render_line_layer(make_geojson(gdfrec), name="recorte_borda")]
 
                 st.markdown("#### Mapa — Recorte selecionado (preenchido pela variável escolhida)")
                 if basemap.startswith("Satélite"):
-                    deck(layers_rec, satellite=True)
+                    deck(layersrec, satellite=True)
                 else:
-                    osm_basemap_deck(layers_rec)
+                    osm_basemap_deck(layersrec)
 
                 # Export PNG 300 DPI do mapa do recorte
-                if st.button("🖼️ Gerar PNG 300 DPI (mapa do recorte)", key="t1_btn_png_rec"):
+                if st.button("🖼️ Gerar PNG 300 DPI (mapa do recorte)", key="t1_btn_pngrec"):
                     try:
                         titulo = f"{var_label_for_legend}" + (f" — {year}" if years and year is not None else "")
                         png_bytes = _t1_png_mapa_300dpi(
-                            gdf_color_rec[["value", "geometry"]].dropna(subset=["value"]),
+                            gdf_colorrec[["value", "geometry"]].dropna(subset=["value"]),
                             "value",
                             cmap,
-                            gdf_overlay=gdf_rec,
+                            gdf_overlay=gdfrec,
                             titulo=titulo,
                             dpi=300,
                         )
                         base_nome = f"recorte_{os.path.splitext(rec_sel_name)[0]}"
-                        st.download_button("Baixar PNG 300 DPI (mapa do recorte)", png_bytes, file_name=f"{base_nome}_{var_label_for_legend}_300dpi.png", mime="image/png", key="t1_dl_png_rec")
+                        st.download_button("Baixar PNG 300 DPI (mapa do recorte)", png_bytes, file_name=f"{base_nome}_{var_label_for_legend}_300dpi.png", mime="image/png", key="t1_dl_pngrec")
                     except Exception as e:
                         st.caption(f"Export PNG indisponível ({e})")
 
@@ -2702,7 +2701,7 @@ with tab1:
                 st.markdown(f"**Legenda — {var_label_for_legend} (recorte)**")
                 if legend_kind == "categorical":
                     # mostra apenas categorias presentes no recorte
-                    present = gdf_color_rec["value"].dropna().astype(str).unique().tolist()
+                    present = gdf_colorrec["value"].dropna().astype(str).unique().tolist()
                     for k in sorted(present, key=lambda x: str(x)):
                         _legend_row(cmap[k], str(k))
                 else:
@@ -2729,34 +2728,34 @@ with tab1:
 
                 # Dados da área recortada (por SQ e resumo)
                 st.markdown("#### Métricas para a área recortada")
-                df_vars_rec = df_vars[df_vars[join_col].isin(sq_sel)].copy()
+                df_varsrec = df_vars[df_vars[join_col].isin(sq_sel)].copy()
                 # variáveis numéricas válidas no recorte
-                id_like_r = {c for c in df_vars_rec.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
-                time_like_r = {c for c in df_vars_rec.columns if str(c).lower() in {"ano", "year"}}
+                id_like_r = {c for c in df_varsrec.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
+                time_like_r = {c for c in df_varsrec.columns if str(c).lower() in {"ano", "year"}}
                 ignore_cols_r = id_like_r | time_like_r
-                num_cols_rec = [c for c in df_vars_rec.columns if pd.api.types.is_numeric_dtype(df_vars_rec[c])]
-                var_opts_rec = [c for c in num_cols_rec if c not in ignore_cols_r] or [c for c in df_vars_rec.columns if c not in ignore_cols_r]
+                num_colsrec = [c for c in df_varsrec.columns if pd.api.types.is_numeric_dtype(df_varsrec[c])]
+                var_optsrec = [c for c in num_colsrec if c not in ignore_cols_r] or [c for c in df_varsrec.columns if c not in ignore_cols_r]
 
-                modo = st.radio("Exibição", ["Por SQ", "Resumo (estatísticas)"], horizontal=True, index=0, key="t1_modo_rec")
+                modo = st.radio("Exibição", ["Por SQ", "Resumo (estatísticas)"], horizontal=True, index=0, key="t1_modorec")
                 if modo == "Por SQ":
                     # mostra prioritariamente a variável usada no mapa (se for numérica)
                     cols_show = [join_col]
-                    if color_mode in ("numeric_from_flag", "fallback_numeric") and var_label_for_legend in df_vars_rec.columns:
+                    if color_mode in ("numeric_from_flag", "fallback_numeric") and var_label_for_legend in df_varsrec.columns:
                         cols_show.append(var_label_for_legend)
-                    st.dataframe(df_vars_rec[cols_show].sort_values(join_col), use_container_width=True)
-                    _t1_download_df(df_vars_rec[cols_show].sort_values(join_col), f"recorte_porSQ_{os.path.splitext(rec_sel_name)[0]}")
+                    st.dataframe(df_varsrec[cols_show].sort_values(join_col), use_container_width=True)
+                    _t1_download_df(df_varsrec[cols_show].sort_values(join_col), f"recorte_porSQ_{os.path.splitext(rec_sel_name)[0]}")
                 else:
                     # resumo das numéricas selecionadas
                     vars_escolhidas = st.multiselect(
                         "Variáveis (métricas) a resumir",
-                        var_opts_rec,
-                        default=[var_label_for_legend] if var_label_for_legend in var_opts_rec else var_opts_rec[: min(5, len(var_opts_rec))],
-                        key="t1_vars_rec"
+                        var_optsrec,
+                        default=[var_label_for_legend] if var_label_for_legend in var_optsrec else var_optsrec[: min(5, len(var_optsrec))],
+                        key="t1_varsrec"
                     )
                     if vars_escolhidas:
-                        desc = df_vars_rec[vars_escolhidas].describe().T
+                        desc = df_varsrec[vars_escolhidas].describe().T
                         st.dataframe(desc, use_container_width=True)
-                        _t1_download_df(desc.reset_index().rename(columns={"index": "variavel"}), f"recorte_resumo_{os.path.splitext(rec_sel_name)[0]}")
+                        _t1_download_df(desc.reset_index().rename(columns={"index": "variavel"}), f"recorteresumo_{os.path.splitext(rec_sel_name)[0]}")
 
     except Exception as e:
         st.warning(f"Não foi possível listar/ler recortes: {e}")
@@ -2778,7 +2777,7 @@ with tab1:
             "color_mode": color_mode,
             "var_usada_para_pintar/legenda": var_label_for_legend,
             "recortes_dir": rec_dir,
-            "arquivo_recorte_sel": recorte_file_path,
+            "arquivorecorte_sel": recorte_file_path,
             "legend_kind": legend_kind,
         }
         st.code(json.dumps(debug_info, ensure_ascii=False, indent=2), language="json")
@@ -2787,7 +2786,7 @@ with tab1:
 # ABA 2 — Clusterização (mapas, métricas por cluster e testes) — REFEITA (v2)
 # -----------------------------------------------------------------------------
 with tab2:
-    import re as _re
+    import re as re
 
     st.subheader("🧬 Clusterização — Mapas, Métricas e Testes")
 
@@ -2829,7 +2828,7 @@ with tab2:
                 return int(v)
         except Exception:
             pass
-        m = _re.search(r"\d+", str(x))
+        m = re.search(r"\d+", str(x))
         return int(m.group(0)) if m else None
 
     def _safe_int(x, allowed: set[int] | None = None) -> int | None:
@@ -2849,7 +2848,7 @@ with tab2:
         3: "3 – Clusterizado",
     }
 
-    ban_re = _re.compile(r"(cluster|est[aá]gio|classe|label|pred)", _re.I)
+    banre = re.compile(r"(cluster|est[aá]gio|classe|label|pred)", re.I)
 
     # ==========
     # CARGA DE CLUSTERS (GitHub ou upload)
@@ -2896,7 +2895,7 @@ with tab2:
         stat_col = "media" if estat == "Média" else "mediana"
 
         var_opts = sorted(dfm_use["variavel"].dropna().astype(str).unique().tolist())
-        var_opts = [v for v in var_opts if not ban_re.search(str(v))]
+        var_opts = [v for v in var_opts if not banre.search(str(v))]
         if not var_opts:
             st.info("Nenhuma variável numérica elegível encontrada (após remover colunas de cluster/estágio/classe/pred).")
         else:
@@ -2935,7 +2934,7 @@ with tab2:
     id_like = {c for c in df_vals_raw.columns if str(c).lower() in {"sq", "id", "codigo", "code"}}
     time_like = {c for c in df_vals_raw.columns if str(c).lower() in {"ano", "year"}}
     num_vars = [c for c in df_vals_raw.columns if pd.api.types.is_numeric_dtype(df_vals_raw[c])]
-    var_opts_base = sorted([c for c in num_vars if (c not in id_like | time_like) and not ban_re.search(str(c))])
+    var_opts_base = sorted([c for c in num_vars if (c not in id_like | time_like) and not banre.search(str(c))])
 
     vars_sel_adv = st.multiselect(
         "Variáveis para testes (0–3)",
@@ -3189,7 +3188,7 @@ def render_tab3():
                 df_show = df_any[[c_var] + sel_stats].copy().rename(columns={c_var: "variavel"})
                 st.markdown("**Resumo por variável**")
                 st.dataframe(df_show, use_container_width=True)
-                download_df(df_show, f"univariadas_{versao_u}_resumo")
+                download_df(df_show, f"univariadas_{versao_u}resumo")
             else:
                 st.info("Selecione ao menos uma coluna numérica.")
 
@@ -3214,14 +3213,14 @@ def render_tab3():
         df_pairs["pval"] = df_pairs[col_p]
         if use_fdr:
             df_pairs["qval"] = _bh_fdr(df_pairs["pval"])
-            df_pairs["sig_ref"] = df_pairs["qval"]
+            df_pairs["sigref"] = df_pairs["qval"]
             df_pairs["sig_kind"] = "q (FDR-BH)"
         else:
             df_pairs["qval"] = np.nan
-            df_pairs["sig_ref"] = df_pairs["pval"]
+            df_pairs["sigref"] = df_pairs["pval"]
             df_pairs["sig_kind"] = "p"
-        df_pairs["sig"] = df_pairs["sig_ref"].apply(_sig_stars)
-        df_pairs["significante"] = (df_pairs["sig_ref"] <= alpha).astype(int)
+        df_pairs["sig"] = df_pairs["sigref"].apply(_sig_stars)
+        df_pairs["significante"] = (df_pairs["sigref"] <= alpha).astype(int)
         have_p = True
     else:
         df_pairs["sig"] = "—"
@@ -3239,7 +3238,7 @@ def render_tab3():
         st.metric("Testes (pares)", total_tests)
 
         if have_p:
-            n_sig = int((df_pairs["sig_ref"] <= alpha).sum())
+            n_sig = int((df_pairs["sigref"] <= alpha).sum())
             perc = (n_sig / total_tests * 100.0) if total_tests else 0.0
             st.metric(f"Significantes (α={alpha:g}, {df_pairs['sig_kind'].iloc[0]})", f"{n_sig} ({perc:.1f}%)")
             # top efeitos (por módulo da estatística)
@@ -3349,9 +3348,9 @@ with tab5:
     st.caption("Lê pastas dentro de `Data/clusterizador` e mostra métricas/tabelas dos experimentos.")
 
     # ------ helpers locais da aba 5 (chaves únicas prefixadas t5_) ------
-    def _list_subdirs(owner_repo: str, base_dir: str, branch: str) -> list[str]:
+    def _list_subdirs(ownerrepo: str, base_dir: str, branch: str) -> list[str]:
         try:
-            items = github_listdir(owner_repo, base_dir, branch)
+            items = github_listdir(ownerrepo, base_dir, branch)
             return [it["name"] for it in items if isinstance(it, dict) and it.get("type") == "dir"]
         except Exception:
             return []
@@ -3390,7 +3389,7 @@ with tab5:
         compare_all = st.toggle("Comparar todas as pastas", value=False, key="t5_compare_all")
 
     # ------------------------- modo: pasta única -------------------------
-    def _render_single(folder_name: str):
+    def render_single(folder_name: str):
         st.markdown(f"### 📁 {folder_name}")
         folder_path = f"{base_cluster}/{folder_name}"
 
@@ -3485,7 +3484,7 @@ with tab5:
                 st.plotly_chart(fig, use_container_width=True)
 
     if not compare_all:
-        _render_single(sel_dir)
+        render_single(sel_dir)
         st.stop()
 
     # ------------------------- modo: comparar todas -------------------------
@@ -3561,6 +3560,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
