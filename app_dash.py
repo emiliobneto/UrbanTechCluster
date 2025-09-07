@@ -3456,7 +3456,7 @@ def render_tab3():
 # ---------------- Helpers específicos da aba ----------------
     def _sig_stars(p_or_q: float) -> str:
         try:
-        x = float(p_or_q)
+            x = float(p_or_q)
         except Exception:
             return "ns"
         if not np.isfinite(x):
@@ -3976,6 +3976,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
