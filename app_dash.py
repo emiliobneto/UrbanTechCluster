@@ -206,16 +206,19 @@ def github_repo_info(owner_repo: str):
 
 
 def resolve_branch(owner_repo: str, user_branch: str | None):
-    """Valida a branch informada; se vazia/inelegível, usa a default do repo."""
     owner_repo = normalize_repo(owner_repo)
     b = (user_branch or "").strip()
-    if b:
-        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
-        r = requests.get(url, headers=_gh_headers(), timeout=60)
-        if r.status_code == 200:
-            return b
-    info = github_repo_info(owner_repo)
-    return info.get("default_branch", "main")
+    try:
+        if b:
+            url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
+            r = requests.get(url, headers=_gh_headers(), timeout=20)
+            if r.status_code == 200:
+                return b
+        info = github_repo_info(owner_repo)  # já com timeout menor
+        return info.get("default_branch", "main")
+    except Exception:
+        # fallback bem-comportado
+        return b or "main"
 
 
 def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
@@ -966,6 +969,7 @@ def deck(layers, satellite=False, initial_view_state=None):
     )
     st.pydeck_chart(r, use_container_width=True)
 
+# ✅ MANTER ESTA VERSÃO
 def osm_basemap_deck(layers, initial_view_state=None):
     if pdk is None:
         st.error("pydeck não está instalado. Instale com: pip install pydeck")
@@ -977,18 +981,6 @@ def osm_basemap_deck(layers, initial_view_state=None):
         map_style=None,
     )
     st.pydeck_chart(r, use_container_width=True)
-
-
-def osm_basemap_deck(layers, initial_view_state=None):
-    tile = pdk.Layer("TileLayer", data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
-    r = pdk.Deck(
-        layers=[tile] + layers,
-        initial_view_state=initial_view_state
-        or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
-        map_style=None,
-    )
-    st.pydeck_chart(r, use_container_width=True)
-
 
 # ---------- LEGENDAS ----------
 
@@ -2154,18 +2146,21 @@ with st.sidebar:
     st.header("🔗 Fonte dos Dados (GitHub)")
     repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster")
     branch_input = st.text_input("branch (vazio = auto)", value="")
-    try:
-        repo = normalize_repo(repo_input)
-        branch = resolve_branch(repo, branch_input)
-        st.caption(f"Usando: **{repo}@{branch}**")
-    except Exception as e:
-        st.error(f"Configuração inválida: {e}")
-        st.stop()
-    st.divider()
     st.header("🗺️ Mapbox (opcional)")
     st.caption("Defina `mapbox.token` em secrets para habilitar satélite.")
 
+# Resolve repo/branch FORA da sidebar; se der erro, mostra na área principal (já pintada)
+try:
+    repo = normalize_repo(repo_input)
+    branch = resolve_branch(repo, branch_input)
+    st.caption(f"Usando: **{repo}@{branch}**")  # pode ficar na área principal
+except Exception as e:
+    st.error(f"Configuração inválida: {e}")
+    st.info("Ajuste os campos na barra lateral (ex.: owner/repo corretos ou adicione token GitHub em st.secrets).")
+    st.stop()
+
 if not repo or not branch:
+    st.info("Informe o repositório e a branch na barra lateral.")
     st.stop()
 
 # ==========================
@@ -3811,6 +3806,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
