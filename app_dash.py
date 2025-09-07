@@ -866,16 +866,16 @@ def _compute_pairs_fast(
 # CORES / CLASSIF / MAPAS / LEGENDAS
 # ==========================
 
+# Sequential sem constante global: usa Viridis do Plotly
 def pick_sequential(n: int):
-    n = max(4, min(8, n))
-    return SEQUENTIAL.get(n, SEQUENTIAL[6])
-
-
-def pick_categorical(k: int):
-    if k <= len(CATEGORICAL):
-        return CATEGORICAL[:k]
-    reps = (k // len(CATEGORICAL)) + 1
-    return (CATEGORICAL * reps)[:k]
+    import numpy as _np
+    from plotly import express as _px
+    n = int(max(4, min(9, n)))
+    base = _px.colors.sequential.Viridis  # pode trocar por .YlOrRd, .Blues etc.
+    if n >= len(base):
+        return base
+    idxs = _np.linspace(0, len(base) - 1, n).round().astype(int).tolist()
+    return [base[i] for i in idxs]
 
 
 def is_categorical(series: pd.Series) -> bool:
@@ -2745,11 +2745,21 @@ with tab2:
             st.info("pydeck não está disponível; não foi possível renderizar o mapa.")
             return
         view = pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10)
-        map_style = None if not satellite else "mapbox://styles/mapbox/satellite-streets-v12"
-        if satellite and not token = _secret(["mapbox","token"]):
-            st.info("Para o estilo Satélite, defina `st.secrets['mapbox']['token']`.")
-        deck_obj = pdk.Deck(layers=layers, initial_view_state=view, map_style=map_style)
+        token = _secret(["mapbox", "token"])
+    
+        if satellite and not token:
+            st.info("Para o estilo Satélite, defina `st.secrets['mapbox']['token']`. Usando OSM.")
+            tile = pdk.Layer("TileLayer", data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+            layers = [tile] + layers
+            map_style = None
+            api_keys = None
+        else:
+            map_style = "mapbox://styles/mapbox/satellite-streets-v12" if satellite else None
+            api_keys = {"mapbox": token} if token else None
+    
+        deck_obj = pdk.Deck(layers=layers, initial_view_state=view, map_style=map_style, api_keys=api_keys)
         st.pydeck_chart(deck_obj, use_container_width=True)
+
 
     # rótulos de clusters
     label_map = {
@@ -3207,7 +3217,8 @@ with tab2:
         min_df    = g[vars_list].min()
         max_df    = g[vars_list].max()
         q_df      = g[vars_list].quantile([0.25, 0.75])
-        p25_df    = q_df.xs(0.25, level=1); p75_df = q_df.xs(0.75, level=1)
+        p25_df    = q_df.xs(0.25, level=1); 
+        p75_df    = q_df.xs(0.75, level=1)
         cv_df     = std_df / mean_df
         parts = [
             _to_long("n", count_df), _to_long("missings", miss_df), _to_long("media", mean_df),
@@ -3805,6 +3816,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
