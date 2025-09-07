@@ -270,6 +270,11 @@ def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
         raise RuntimeError("Recebi HTML em vez do arquivo. Provável rate limit/privado. Defina token.")
     return data
 
+st.subheader("Quadras e camadas adicionais (GPKG)")
+carregar_mapa = st.checkbox("Carregar camadas agora", value=False, key="t1_load_now")
+if not carregar_mapa and "gdf_quadras_cached" not in st.session_state:
+    st.info("Marque **Carregar camadas agora** para baixar `quadras.gpkg` do GitHub.")
+    st.stop()
 
 @st.cache_data(show_spinner=True)
 def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
@@ -2228,12 +2233,12 @@ with tab1:
             except Exception as ee:
                 st.error(f"Erro ao listar árvore do repositório: {ee}\n"
                          f"Falha original ao tentar ler '{quadras_path_default}': {first_err}")
-                st.stop()
+                return
             candidates = [p for p in all_paths if p.lower().endswith("quadras.gpkg")]
             candidates = sorted(candidates, key=lambda p: ("/data/" not in p.lower(), "/mapa/" not in p.lower(), len(p)))
             if not candidates:
                 st.error(f"Não encontrei 'quadras.gpkg'. Erro ao tentar '{quadras_path_default}': {first_err}")
-                st.stop()
+                return
             quadras_path_used = st.selectbox("Selecione o arquivo de quadras:", candidates, index=0, key="t1_quadras_sel")
             gdf_quadras = load_gpkg(repo, quadras_path_used, branch)
             st.success(f"Carregado: {quadras_path_used}")
@@ -2243,7 +2248,7 @@ with tab1:
     sq_col_quadras = "SQ" if "SQ" in gdf_quadras.columns else next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not sq_col_quadras:
         st.error("Camada de quadras não possui coluna 'SQ'.")
-        st.stop()
+        return
 
     # ---------------- Camadas auxiliares (opcional) ----------------
     loaded_layers, other_layers_paths = [], []
@@ -2280,7 +2285,7 @@ with tab1:
         parquet_files = [f for f in parquets_all if incl_pred or not f["name"].lower().startswith("pred_")]
         if not parquet_files:
             st.warning(f"Nenhum .parquet encontrado em {base_dir}.")
-            st.stop()
+            return
         sel_file = st.selectbox("Arquivo .parquet com variáveis", [f["name"] for f in parquet_files], key="t1_varfile")
         fobj = next(x for x in parquet_files if x["name"] == sel_file)
         data_file_path = fobj["path"]
@@ -2290,7 +2295,7 @@ with tab1:
         join_col = next((c for c in df_vars.columns if str(c).upper() == "SQ"), None)
         if join_col is None:
             st.error("Dataset selecionado não possui coluna 'SQ'.")
-            st.stop()
+            return
         years_col = next((c for c in df_vars.columns if str(c).lower() in ("ano", "year")), None)
         years = sorted([int(y) for y in df_vars[years_col].dropna().unique()]) if years_col else []
         year = st.select_slider("Ano", options=years, value=years[-1], key="t1_ano") if years else None
@@ -2630,12 +2635,10 @@ with tab1:
 # ABA 2 — Clusterização (mapas, métricas por cluster e testes) — V2 (COMPLETA)
 # -----------------------------------------------------------------------------
 with tab2:
-    import io
-    import re
-    import json
-    import numpy as np
-    import pandas as pd
-    import streamlit as st
+    if st.checkbox("Ativar aba 2 (carregar dados e cálculos)", key="t2_enable"):
+        render_tab2()  # mova o conteúdo para uma função
+    else:
+        st.info("Marque o checkbox para carregar esta aba.")
 
     # Tenta garantir pydeck/geopandas se o mapa for usado
     try:
@@ -2658,7 +2661,7 @@ with tab2:
 
     if not repo or not branch:
         st.error("Defina `repo` e `branch` antes de abrir a Aba 2 (ex.: em controles na Aba 1).")
-        st.stop()
+        return
 
     # Exigiremos alguns helpers que já devem existir no app principal
     required_helpers = [
@@ -2671,7 +2674,7 @@ with tab2:
             "Estes helpers precisam existir no app principal e não foram encontrados: "
             + ", ".join(missing)
         )
-        st.stop()
+        return
 
     # =========================================================================
     # HELPERS LOCAIS (apenas o que a Aba 2 usa diretamente)
@@ -2824,7 +2827,7 @@ with tab2:
 
     if not isinstance(df_est_raw, pd.DataFrame) or df_est_raw.empty:
         st.error(f"Clusters indisponíveis. {source_label or ''}")
-        st.stop()
+        return
 
     # Ano + coluna de cluster
     ano_col_est = next((c for c in df_est_raw.columns if str(c).lower() in ("ano", "year")), None)
@@ -2837,7 +2840,7 @@ with tab2:
     cluster_cols = [c for c in df_est_raw.columns if re.search(r"(?i)(cluster|est[aá]gio|label)", str(c))]
     if not cluster_cols:
         st.error("Não encontrei coluna de cluster (ex.: EstagioClusterizacao, Cluster, Label).")
-        st.stop()
+        return
     preferred = next((c for c in cluster_cols if str(c).lower() == "estagioclusterizacao"), cluster_cols[0])
     cluster_col = st.selectbox("Coluna de cluster", cluster_cols, index=cluster_cols.index(preferred), key="t2_cluster_col")
 
@@ -2846,7 +2849,7 @@ with tab2:
     sq_est_col = next((c for c in df_est_clean.columns if str(c).upper() == "SQ"), None)
     if sq_est_col is None:
         st.error("Arquivo de clusters precisa ter coluna 'SQ'.")
-        st.stop()
+        return
     df_est_clean["_SQ_norm"] = _norm_sq_series(df_est_clean[sq_est_col])
     if (ano_col_est is not None) and (year_sel is not None):
         df_est_clean = df_est_clean[pd.to_numeric(df_est_clean[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
@@ -2877,7 +2880,7 @@ with tab2:
     ]
     if not vals_files:
         st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
-        st.stop()
+        return
 
     sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
     vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
@@ -2886,7 +2889,7 @@ with tab2:
     sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
     if sq_col_vals is None:
         st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
-        st.stop()
+        return
     ano_col_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
     if ano_col_vals and year_sel is not None:
         df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
@@ -2895,7 +2898,7 @@ with tab2:
     # CACHE/PRELOAD: métricas por cluster × ano
     # =========================================================================
     @st.cache_data(show_spinner=True, ttl=3600, max_entries=6)
-    def _preload_cluster_metrics_by_year(
+    def _preload_cluster_metrics_for_year(
         df_vals_raw: pd.DataFrame,
         df_est_raw: pd.DataFrame,
         cluster_col: str,
@@ -3019,7 +3022,7 @@ with tab2:
     if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
         try:
             with st.spinner("Pré-carregando métricas por cluster×ano..."):
-                df_metrics_all = _preload_cluster_metrics_by_year(
+                df_metrics_all = _preload_cluster_metrics_for_year(
                     df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
                 )
             st.session_state[metrics_key] = df_metrics_all
@@ -3127,7 +3130,7 @@ with tab2:
     if (dfm is None or dfm.empty):
         with st.spinner("Calculando métricas para o ano selecionado..."):
             try:
-                dfm = _preload_cluster_metrics_by_year(df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars)
+                dfm = _preload_cluster_metrics_for_year(df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars)
             except MemoryError:
                 dfm = pd.DataFrame()
         st.session_state[metrics_key] = dfm
@@ -3557,6 +3560,10 @@ with tab3:
 # ABA 4 — PCA|ML
 # -----------------------------------------------------------------------------
 with tab4:
+    if st.checkbox("Ativar aba 4 (carregar dados e cálculos)", key="t4_enable"):
+        render_tab4()  # mova o conteúdo para uma função
+    else:
+        st.info("Marque o checkbox para carregar esta aba.")
     # (opcional) PCA prontos
     render_pca_tab_inline(
         repo, branch,
@@ -3590,6 +3597,10 @@ with tab4:
 # ABA 5 — Clusterizador (Data/clusterizador)
 # -----------------------------------------------------------------------------
 with tab5:
+    if st.checkbox("Ativar aba 5 (carregar dados e cálculos)", key="t5_enable"):
+        render_tab5()  # mova o conteúdo para uma função
+    else:
+        st.info("Marque o checkbox para carregar esta aba.")
     st.subheader("🤖 Clusterizador — métricas e comparação")
     st.caption("Lê pastas dentro de `Data/clusterizador` e mostra métricas/tabelas dos experimentos.")
 
@@ -3623,7 +3634,7 @@ with tab5:
     subdirs_all = _list_subdirs(repo, base_cluster, branch)
     if not subdirs_all:
         st.error("Nenhuma pasta encontrada em `Data/clusterizador`.")
-        st.stop()
+        return
 
     # Por padrão, usa as 5 primeiras pastas (como nas figuras) para seleção única
     default_5 = subdirs_all[:5]
@@ -3731,7 +3742,7 @@ with tab5:
 
     if not compare_all:
         render_single(sel_dir)
-        st.stop()
+       return
 
     # ------------------------- modo: comparar todas -------------------------
     st.markdown("### 📊 Comparação entre pastas")
@@ -3746,7 +3757,7 @@ with tab5:
             frames.append(tmp)
     if not frames:
         st.info("Nenhuma pasta possui `metricas_todos_modelos.csv` para comparação.")
-        st.stop()
+        return
 
     df_all = pd.concat(frames, ignore_index=True)
     st.dataframe(df_all, use_container_width=True)
@@ -3806,6 +3817,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
