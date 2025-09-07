@@ -57,111 +57,6 @@ st.title(TITLE)
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
-# cluster como código 0..3 quando possível
-def _to_int_code(x):
-    try:
-        v = float(str(x).strip())
-        if np.isfinite(v) and abs(v-int(v))<1e-9: return int(v)
-    except Exception: pass
-    m = re.search(r"\d+", str(x))
-    return int(m.group(0)) if m else None
-est["_cl_code"] = est[cluster_col].map(_to_int_code).astype("Int64")
-
-# interseção de anos (ou None)
-if ano_vals and ano_est:
-    anos = sorted(
-        set(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int))
-        & set(pd.to_numeric(est[ano_est],  errors="coerce").dropna().astype(int))
-    )
-elif ano_vals:
-    anos = sorted(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int).unique().tolist())
-elif ano_est:
-    anos = sorted(pd.to_numeric(est[ano_est], errors="coerce").dropna().astype(int).unique().tolist())
-else:
-    anos = [None]  # sem ano
-
-# selecionar variáveis numéricas válidas
-id_like   = {c for c in vals.columns if str(c).lower() in {"sq","id","codigo","code","_sq_norm"}}
-time_like = {c for c in vals.columns if str(c).lower() in {"ano","year"}}
-num_cols  = [c for c in vals.columns if pd.api.types.is_numeric_dtype(vals[c])]
-var_all   = [c for c in num_cols if c not in (id_like | time_like)]
-
-out_frames = []
-
-for ano in anos:
-    # filtra ano em ambos os lados (quando existir)
-    v = vals if (ano is None or not ano_vals) else vals[pd.to_numeric(vals[ano_vals], errors="coerce").astype("Int64")==ano]
-    e = est  if (ano is None or not ano_est) else est [pd.to_numeric(est [ano_est ], errors="coerce").astype("Int64")==ano]
-    # pega a melhor linha por SQ (caso tenha repetição por merges)
-    e = e.sort_values(["_SQ_norm","_cl_code"]).drop_duplicates("_SQ_norm", keep="last")
-
-    # mapa SQ->cluster
-    mapper = e.set_index("_SQ_norm")["_cl_code"]
-
-    # processa em blocos de variáveis para economizar memória
-    for i in range(0, len(var_all), chunk_size):
-        chunk = var_all[i:i+chunk_size]
-        d = v[["_SQ_norm"] + chunk].copy()
-        d[chunk] = d[chunk].apply(pd.to_numeric, errors="coerce")
-        d["_cl_code"] = d["_SQ_norm"].map(mapper).astype("Int64")
-        d = d[d["_cl_code"].isin([0,1,2,3])]  # clusters conhecidos
-
-        if d.empty:
-            continue
-
-        g = d.groupby("_cl_code", observed=True)
-
-        n_df     = g[chunk].count()
-        miss_df  = pd.DataFrame(g.size().values[:,None] - n_df.values, index=n_df.index, columns=chunk)
-        mean_df  = g[chunk].mean()
-        med_df   = g[chunk].median()
-        std_df   = g[chunk].std(ddof=1)
-        min_df   = g[chunk].min()
-        max_df   = g[chunk].max()
-        q_df     = g[chunk].quantile([0.25, 0.75])
-        p25_df   = q_df.xs(0.25, level=1)
-        p75_df   = q_df.xs(0.75, level=1)
-        cv_df    = std_df/mean_df
-
-        def _to_long(name, df_):
-            return (
-                df_.stack()
-                   .rename(name)
-                   .reset_index()
-                   .rename(columns={"_cl_code":"cluster","level_1":"variavel"})
-            )
-
-        parts = [
-            _to_long("n",             n_df),
-            _to_long("missings",      miss_df),
-            _to_long("media",         mean_df),
-            _to_long("mediana",       med_df),
-            _to_long("desvio_padrao", std_df),
-            _to_long("p25",           p25_df),
-            _to_long("p75",           p75_df),
-            _to_long("minimo",        min_df),
-            _to_long("maximo",        max_df),
-            _to_long("coef_var",      cv_df),
-        ]
-        merged = parts[0]
-        for p in parts[1:]:
-            merged = merged.merge(p, on=["cluster","variavel"], how="left")
-        merged.insert(0, "ano", ano)
-        out_frames.append(merged)
-
-if not out_frames:
-    return pd.DataFrame(columns=["ano","cluster","variavel","n","missings","media","mediana","desvio_padrao","p25","p75","minimo","maximo","coef_var"])
-
-out = pd.concat(out_frames, ignore_index=True)
-# rótulo textual
-out["cluster_label"] = out["cluster"].map({
-    0: "0 – Ausência de clusterização",
-    1: "1 – Cluster em estágio inicial",
-    2: "2 – Cluster em formação",
-    3: "3 – Clusterizado",
-})
-return out
-
 def _load_quadras_min(repo, branch):
     gdf = st.session_state.get("gdf_quadras_cached")
     if gdf is None or gdf.empty:
@@ -179,6 +74,7 @@ def _load_quadras_min(repo, branch):
         gmin["_centroid"] = gmin.geometry
     return gmin, sq_col
 
+# uso:
 try:
     gdfq_min, sq_col_quadras = _load_quadras_min(repo, branch)
 except Exception as e:
@@ -336,37 +232,42 @@ except Exception as e:
                     st.metric("Feições no recorte", len(gdf_sub))
 
 def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
-        try:
-            clusters_dir = pick_existing_dir(
-                repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
-            )
-            all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
-            # preferir nome exato
-            cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", str(f["name"]))]
-            if not cand:
-                cand = [f for f in all_in_dir if re.search(r"(?i)est[aá]gio", str(f["name"])) and re.search(r"(?i)cluster", str(f["name"]))]
-            if not cand:
-                return None, "Não encontrei `EstagioClusterizacao.{csv|parquet}` em Data/dados/Originais."
-            est_file = cand[0]
-            df_est = load_parquet(repo, est_file["path"], branch) if str(est_file["name"]).lower().endswith(".parquet") else load_csv(repo, est_file["path"], branch)
-            source_label = f"{clusters_dir}/{est_file['name']}"
-            return df_est, source_label
-        except Exception as e:
-            return None, f"Falha ao ler arquivo de clusters: {e}"
+    try:
+        clusters_dir = pick_existing_dir(
+            repo, branch, ["Data/dados/Originais", "Data/dados/originais", "data/dados/originais"]
+        )
+        all_in_dir = list_files(repo, clusters_dir, branch, (".csv", ".parquet"))
+        # preferir nome exato
+        cand = [f for f in all_in_dir if re.fullmatch(r"(?i)EstagioClusterizacao\.(csv|parquet)", str(f["name"]))]
+        if not cand:
+            cand = [f for f in all_in_dir if re.search(r"(?i)est[aá]gio", str(f["name"])) and re.search(r"(?i)cluster", str(f["name"]))]
+        if not cand:
+            return None, "Não encontrei `EstagioClusterizacao.{csv|parquet}` em Data/dados/Originais."
+        est_file = cand[0]
+        df_est = (
+            load_parquet(repo, est_file["path"], branch)
+            if str(est_file["name"]).lower().endswith(".parquet")
+            else load_csv(repo, est_file["path"], branch)
+        )
+        source_label = f"{clusters_dir}/{est_file['name']}"
+        return df_est, source_label
+    except Exception as e:
+        return None, f"Falha ao ler arquivo de clusters: {e}"
 
-    df_est_raw, source_label = (None, "")
-    if up is not None:
-        try:
-            df_est_raw = (pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up))
-            source_label = f"(upload) {up.name}"
-        except Exception as e:
-            st.error(f"Falha ao ler upload: {e}")
-    else:
-        df_est_raw, source_label = _load_clusters(repo, branch)
+# uso:
+df_est_raw, source_label = (None, "")
+if up is not None:
+    try:
+        df_est_raw = (pd.read_parquet(up) if up.name.lower().endswith(".parquet") else pd.read_csv(up))
+        source_label = f"(upload) {up.name}"
+    except Exception as e:
+        st.error(f"Falha ao ler upload: {e}")
+else:
+    df_est_raw, source_label = _load_clusters(repo, branch)
 
-    if not isinstance(df_est_raw, pd.DataFrame) or df_est_raw.empty:
-        st.error(f"Clusters indisponíveis. {source_label or ''}")
-        st.stop()
+if not isinstance(df_est_raw, pd.DataFrame) or df_est_raw.empty:
+    st.error(f"Clusters indisponíveis. {source_label or ''}")
+    st.stop()
 
     # Ano + coluna de cluster (robustos a tipos)
     ano_col_est = next((c for c in df_est_raw.columns if str(c).lower() == "ano"), None)
@@ -406,19 +307,19 @@ def _norm_sq_6(x):
             if len(s) > 6: s = s[-6:]
             return s.zfill(6)
 
-        dfp = df_pred[[sq_col, est_col, pred_col]].copy()
-        dfp.columns = ["SQ_raw", "estagio", "predicted"]
-        dfp["_SQ_norm"] = dfp["SQ_raw"].apply(_norm_sq_6)
+dfp = df_pred[[sq_col, est_col, pred_col]].copy()
+dfp.columns = ["SQ_raw", "estagio", "predicted"]
+dfp["_SQ_norm"] = dfp["SQ_raw"].apply(_norm_sq_6)
 
-        gdf_tmp = gdf_quadras[[sq_geo_col, geom_name]].copy()
-        gdf_tmp["_SQ_norm"] = gdf_tmp[sq_geo_col].apply(_norm_sq_6)
+gdf_tmp = gdf_quadras[[sq_geo_col, geom_name]].copy()
+gdf_tmp["_SQ_norm"] = gdf_tmp[sq_geo_col].apply(_norm_sq_6)
 
-        gdf = gdf_tmp.merge(dfp[["_SQ_norm", "estagio", "predicted"]], on="_SQ_norm", how="left")
-        gdf = ensure_wgs84(gdf)
+gdf = gdf_tmp.merge(dfp[["_SQ_norm", "estagio", "predicted"]], on="_SQ_norm", how="left")
+gdf = ensure_wgs84(gdf)
 
-        # Paletas
-        cmap_est = {str(v): c for v, c in zip(sorted(gdf["estagio"].dropna().astype(str).unique()), pick_categorical(len(gdf["estagio"].dropna().astype(str).unique())))}
-        cmap_pred = {str(v): c for v, c in zip(sorted(gdf["predicted"].dropna().astype(str).unique()), pick_categorical(len(gdf["predicted"].dropna().astype(str).unique())))}
+# Paletas
+cmap_est = {str(v): c for v, c in zip(sorted(gdf["estagio"].dropna().astype(str).unique()), pick_categorical(len(gdf["estagio"].dropna().astype(str).unique())))}
+cmap_pred = {str(v): c for v, c in zip(sorted(gdf["predicted"].dropna().astype(str).unique()), pick_categorical(len(gdf["predicted"].dropna().astype(str).unique())))}
 
 # ===== Hotfix: utilitários globais para testes/efeitos =====
 def _bh_fdr(pvals):
@@ -518,38 +419,35 @@ def download_plotly_png(fig, base_name: str, width_px: int = 2400, height_px: in
         html = fig.to_html(include_plotlyjs="cdn")
         st.download_button("💾 Baixar HTML interativo", html, file_name=f"{base_name}.html", mime="text/html")
 
-def normalizerepo(ownerrepo: str) -> str:
-    s = (ownerrepo or "").strip()
+def normalize_repo(owner_repo: str) -> str:
+    s = (owner_repo or "").strip()
     s = s.replace("https://github.com/", "").replace("http://github.com/", "")
     s = s.strip("/")
     parts = [p for p in s.split("/") if p]
     if len(parts) < 2:
-        raise RuntimeError(
-            "Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechCluster'"
-        )
+        raise RuntimeError("Informe o repositório no formato 'owner/repo'. Ex.: 'emiliobneto/UrbanTechCluster'")
     return f"{parts[0]}/{parts[1]}"
 
-
 @st.cache_data(show_spinner=True)
-def githubrepo_info(ownerrepo: str):
-    ownerrepo = normalizerepo(ownerrepo)
-    url = f"{API_BASE}/repos/{ownerrepo}"
+def github_repo_info(owner_repo: str):
+    owner_repo = normalize_repo(owner_repo)
+    url = f"{API_BASE}/repos/{owner_repo}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo repo {ownerrepo}: {r.status_code} {r.text}")
+        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
     return r.json()
 
-def resolve_branch(ownerrepo: str, user_branch: str | None):
-    ownerrepo = normalizerepo(ownerrepo)
+def resolve_branch(owner_repo: str, user_branch: str | None):
+    owner_repo = normalize_repo(owner_repo)
     b = (user_branch or "").strip()
     if b:
-        url = f"{API_BASE}/repos/{ownerrepo}/branches/{b}"
+        url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
         r = requests.get(url, headers=_gh_headers(), timeout=60)
         if r.status_code == 200:
             return b
-    info = githubrepo_info(ownerrepo)
+    info = github_repo_info(owner_repo)
     return info.get("default_branch", "main")
-
+)
 
 def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
     ownerrepo = normalizerepo(ownerrepo).strip("/")
@@ -683,28 +581,23 @@ def pick_existing_dir(ownerrepo: str, branch: str, candidates: list[str]) -> str
                 return "/".join(parts[: len(key.split("/"))])
     return candidates[0]
 
-# ======== PRELOAD: métricas por cluster × ano, com cache ========
 @st.cache_data(show_spinner=True, ttl=3600, max_entries=6)
 def _preload_cluster_metrics_by_year(
     df_vals_raw: pd.DataFrame,
     df_est_raw: pd.DataFrame,
     cluster_col: str,
     *,
-    chunk_size: int = 60,  # processa n variáveis de cada vez
+    chunk_size: int = 60,
 ) -> pd.DataFrame:
-    """
-    Retorna UM DataFrame 'longo' com colunas:
-    ['ano','cluster','variavel','n','missings','media','mediana','desvio_padrao','p25','p75','minimo','maximo','coef_var'].
-    Pré-calcula para TODOS os anos disponíveis (interseção valores × clusters).
-    Usa cache (st.cache_data).
-    """
     # --- detectar colunas chave ---
-    sq_vals = next((c for c in df_vals_raw.columns if str(c).upper()=="SQ"), None)
-    ano_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano","year")), None)
+    sq_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
+    ano_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
     if sq_vals is None:
         raise RuntimeError("Arquivo de valores não possui coluna 'SQ'.")
-    sq_est  = next((c for c in df_est_raw.columns  if str(c).upper()=="SQ"), None)
-    ano_est = next((c for c in df_est_raw.columns  if str(c).lower() in ("ano","year")), None)
+    sq_est  = next((c for c in df_est_raw.columns  if str(c).upper() == "SQ"), None)
+    ano_est = next((c for c in df_est_raw.columns  if str(c).lower() in ("ano", "year")), None)
+    if sq_est is None:
+        raise RuntimeError("Arquivo de clusters não possui coluna 'SQ'.")
 
     # normaliza SQ
     def _norm_sq_series(s: pd.Series, digits: int = 6) -> pd.Series:
@@ -716,9 +609,116 @@ def _preload_cluster_metrics_by_year(
     vals["_SQ_norm"] = _norm_sq_series(vals[sq_vals])
 
     est  = df_est_raw.copy()
-    if sq_est is None:
-        raise RuntimeError("Arquivo de clusters não possui coluna 'SQ'.")
     est["_SQ_norm"] = _norm_sq_series(est[sq_est])
+
+    # cluster como código 0..3 quando possível
+    import re as _re
+    def _to_int_code(x):
+        try:
+            v = float(str(x).strip())
+            if np.isfinite(v) and abs(v - int(v)) < 1e-9:
+                return int(v)
+        except Exception:
+            pass
+        m = _re.search(r"\d+", str(x))
+        return int(m.group(0)) if m else None
+
+    est["_cl_code"] = est[cluster_col].map(_to_int_code).astype("Int64")
+
+    # interseção de anos (ou None)
+    if ano_vals and ano_est:
+        anos = sorted(
+            set(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int))
+            & set(pd.to_numeric(est[ano_est],  errors="coerce").dropna().astype(int))
+        )
+    elif ano_vals:
+        anos = sorted(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int).unique().tolist())
+    elif ano_est:
+        anos = sorted(pd.to_numeric(est[ano_est], errors="coerce").dropna().astype(int).unique().tolist())
+    else:
+        anos = [None]  # sem ano
+
+    # selecionar variáveis numéricas válidas
+    id_like   = {c for c in vals.columns if str(c).lower() in {"sq","id","codigo","code","_sq_norm"}}
+    time_like = {c for c in vals.columns if str(c).lower() in {"ano","year"}}
+    num_cols  = [c for c in vals.columns if pd.api.types.is_numeric_dtype(vals[c])]
+    var_all   = [c for c in num_cols if c not in (id_like | time_like)]
+
+    out_frames = []
+
+    for ano in anos:
+        # filtra ano em ambos os lados (quando existir)
+        v = vals if (ano is None or not ano_vals) else vals[pd.to_numeric(vals[ano_vals], errors="coerce").astype("Int64") == ano]
+        e = est  if (ano is None or not ano_est) else est [pd.to_numeric(est [ano_est ], errors="coerce").astype("Int64") == ano]
+        # pega a melhor linha por SQ (caso tenha repetição por merges)
+        e = e.sort_values(["_SQ_norm","_cl_code"]).drop_duplicates("_SQ_norm", keep="last")
+
+        # mapa SQ->cluster
+        mapper = e.set_index("_SQ_norm")["_cl_code"]
+
+        # processa em blocos de variáveis para economizar memória
+        for i in range(0, len(var_all), chunk_size):
+            chunk = var_all[i:i+chunk_size]
+            d = v[["_SQ_norm"] + chunk].copy()
+            d[chunk] = d[chunk].apply(pd.to_numeric, errors="coerce")
+            d["_cl_code"] = d["_SQ_norm"].map(mapper).astype("Int64")
+            d = d[d["_cl_code"].isin([0,1,2,3])]  # clusters conhecidos
+
+            if d.empty:
+                continue
+
+            g = d.groupby("_cl_code", observed=True)
+
+            n_df     = g[chunk].count()
+            miss_df  = pd.DataFrame(g.size().values[:,None] - n_df.values, index=n_df.index, columns=chunk)
+            mean_df  = g[chunk].mean()
+            med_df   = g[chunk].median()
+            std_df   = g[chunk].std(ddof=1)
+            min_df   = g[chunk].min()
+            max_df   = g[chunk].max()
+            q_df     = g[chunk].quantile([0.25, 0.75])
+            p25_df   = q_df.xs(0.25, level=1)
+            p75_df   = q_df.xs(0.75, level=1)
+            cv_df    = std_df/mean_df
+
+            def _to_long(name, df_):
+                return (
+                    df_.stack()
+                       .rename(name)
+                       .reset_index()
+                       .rename(columns={"_cl_code":"cluster","level_1":"variavel"})
+                )
+
+            parts = [
+                _to_long("n",             n_df),
+                _to_long("missings",      miss_df),
+                _to_long("media",         mean_df),
+                _to_long("mediana",       med_df),
+                _to_long("desvio_padrao", std_df),
+                _to_long("p25",           p25_df),
+                _to_long("p75",           p75_df),
+                _to_long("minimo",        min_df),
+                _to_long("maximo",        max_df),
+                _to_long("coef_var",      cv_df),
+            ]
+            merged = parts[0]
+            for p in parts[1:]:
+                merged = merged.merge(p, on=["cluster","variavel"], how="left")
+            merged.insert(0, "ano", ano)
+            out_frames.append(merged)
+
+    if not out_frames:
+        return pd.DataFrame(columns=["ano","cluster","variavel","n","missings","media","mediana","desvio_padrao","p25","p75","minimo","maximo","coef_var"])
+
+    out = pd.concat(out_frames, ignore_index=True)
+    out["cluster_label"] = out["cluster"].map({
+        0: "0 – Ausência de clusterização",
+        1: "1 – Cluster em estágio inicial",
+        2: "2 – Cluster em formação",
+        3: "3 – Clusterizado",
+    })
+    return out
+
 
 
 # ---------- DESCRITIVA ----------
@@ -3560,6 +3560,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
