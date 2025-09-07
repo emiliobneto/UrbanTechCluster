@@ -467,14 +467,14 @@ def resolve_branch(owner_repo: str, user_branch: str | None):
     return info.get("default_branch", "main")
 
 def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
-    ownerrepo = normalizerepo(ownerrepo).strip("/")
+    ownerrepo = normalize_repo(ownerrepo).strip("/")
     path = path.lstrip("/")
     return f"{RAW_BASE}/{ownerrepo}/{branch}/{path}"
 
 
 @st.cache_data(show_spinner=False)
 def github_listdir(ownerrepo: str, path: str, branch: str):
-    ownerrepo = normalizerepo(ownerrepo)
+    ownerrepo = normalize_repo(ownerrepo)
     url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
@@ -484,7 +484,7 @@ def github_listdir(ownerrepo: str, path: str, branch: str):
 
 @st.cache_data(show_spinner=True)
 def github_get_contents(ownerrepo: str, path: str, branch: str):
-    ownerrepo = normalizerepo(ownerrepo)
+    ownerrepo = normalize_repo(ownerrepo)
     url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
@@ -563,7 +563,7 @@ def list_files(ownerrepo: str, path: str, branch: str, exts=(".parquet", ".csv",
 
 @st.cache_data(show_spinner=True)
 def github_branch_info(ownerrepo: str, branch: str):
-    ownerrepo = normalizerepo(ownerrepo)
+    ownerrepo = normalize_repo(ownerrepo)
     url = f"{API_BASE}/repos/{ownerrepo}/branches/{branch}"
     r = requests.get(url, headers=_gh_headers(), timeout=60)
     if r.status_code != 200:
@@ -575,7 +575,7 @@ def github_branch_info(ownerrepo: str, branch: str):
 def github_tree_paths(ownerrepo: str, branch: str):
     info = github_branch_info(ownerrepo, branch)
     tree_sha = info["commit"]["commit"]["tree"]["sha"]
-    url = f"{API_BASE}/repos/{normalizerepo(ownerrepo)}/git/trees/{tree_sha}?recursive=1"
+    url = f"{API_BASE}/repos/{normalize_repo(ownerrepo)}/git/trees/{tree_sha}?recursive=1"
     r = requests.get(url, headers=_gh_headers(), timeout=180)
     if r.status_code != 200:
         raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
@@ -2328,7 +2328,7 @@ with st.sidebar:
     repo_input = st.text_input("owner/repo", value="emiliobneto/UrbanTechCluster")
     branch_input = st.text_input("branch (vazio = auto)", value="")
     try:
-        repo = normalizerepo(repo_input)
+        repo = normalize_repo(repo_input)
         branch = resolve_branch(repo, branch_input)
         st.caption(f"Usando: **{repo}@{branch}**")
     except Exception as e:
@@ -3994,6 +3994,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
