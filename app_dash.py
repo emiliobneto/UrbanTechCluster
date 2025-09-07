@@ -57,283 +57,283 @@ st.title(TITLE)
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
-    # cluster como código 0..3 quando possível
-    def _to_int_code(x):
-        try:
-            v = float(str(x).strip())
-            if np.isfinite(v) and abs(v-int(v))<1e-9: return int(v)
-        except Exception: pass
-        m = re.search(r"\d+", str(x))
-        return int(m.group(0)) if m else None
-    est["_cl_code"] = est[cluster_col].map(_to_int_code).astype("Int64")
-
-    # interseção de anos (ou None)
-    if ano_vals and ano_est:
-        anos = sorted(
-            set(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int))
-            & set(pd.to_numeric(est[ano_est],  errors="coerce").dropna().astype(int))
-        )
-    elif ano_vals:
-        anos = sorted(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int).unique().tolist())
-    elif ano_est:
-        anos = sorted(pd.to_numeric(est[ano_est], errors="coerce").dropna().astype(int).unique().tolist())
-    else:
-        anos = [None]  # sem ano
-
-    # selecionar variáveis numéricas válidas
-    id_like   = {c for c in vals.columns if str(c).lower() in {"sq","id","codigo","code","_sq_norm"}}
-    time_like = {c for c in vals.columns if str(c).lower() in {"ano","year"}}
-    num_cols  = [c for c in vals.columns if pd.api.types.is_numeric_dtype(vals[c])]
-    var_all   = [c for c in num_cols if c not in (id_like | time_like)]
-
-    out_frames = []
-
-    for ano in anos:
-        # filtra ano em ambos os lados (quando existir)
-        v = vals if (ano is None or not ano_vals) else vals[pd.to_numeric(vals[ano_vals], errors="coerce").astype("Int64")==ano]
-        e = est  if (ano is None or not ano_est) else est [pd.to_numeric(est [ano_est ], errors="coerce").astype("Int64")==ano]
-        # pega a melhor linha por SQ (caso tenha repetição por merges)
-        e = e.sort_values(["_SQ_norm","_cl_code"]).drop_duplicates("_SQ_norm", keep="last")
-
-        # mapa SQ->cluster
-        mapper = e.set_index("_SQ_norm")["_cl_code"]
-
-        # processa em blocos de variáveis para economizar memória
-        for i in range(0, len(var_all), chunk_size):
-            chunk = var_all[i:i+chunk_size]
-            d = v[["_SQ_norm"] + chunk].copy()
-            d[chunk] = d[chunk].apply(pd.to_numeric, errors="coerce")
-            d["_cl_code"] = d["_SQ_norm"].map(mapper).astype("Int64")
-            d = d[d["_cl_code"].isin([0,1,2,3])]  # clusters conhecidos
-
-            if d.empty:
-                continue
-
-            g = d.groupby("_cl_code", observed=True)
-
-            n_df     = g[chunk].count()
-            miss_df  = pd.DataFrame(g.size().values[:,None] - n_df.values, index=n_df.index, columns=chunk)
-            mean_df  = g[chunk].mean()
-            med_df   = g[chunk].median()
-            std_df   = g[chunk].std(ddof=1)
-            min_df   = g[chunk].min()
-            max_df   = g[chunk].max()
-            q_df     = g[chunk].quantile([0.25, 0.75])
-            p25_df   = q_df.xs(0.25, level=1)
-            p75_df   = q_df.xs(0.75, level=1)
-            cv_df    = std_df/mean_df
-
-            def _to_long(name, df_):
-                return (
-                    df_.stack()
-                       .rename(name)
-                       .reset_index()
-                       .rename(columns={"_cl_code":"cluster","level_1":"variavel"})
-                )
-
-            parts = [
-                _to_long("n",             n_df),
-                _to_long("missings",      miss_df),
-                _to_long("media",         mean_df),
-                _to_long("mediana",       med_df),
-                _to_long("desvio_padrao", std_df),
-                _to_long("p25",           p25_df),
-                _to_long("p75",           p75_df),
-                _to_long("minimo",        min_df),
-                _to_long("maximo",        max_df),
-                _to_long("coef_var",      cv_df),
-            ]
-            merged = parts[0]
-            for p in parts[1:]:
-                merged = merged.merge(p, on=["cluster","variavel"], how="left")
-            merged.insert(0, "ano", ano)
-            out_frames.append(merged)
-
-    if not out_frames:
-        return pd.DataFrame(columns=["ano","cluster","variavel","n","missings","media","mediana","desvio_padrao","p25","p75","minimo","maximo","coef_var"])
-
-    out = pd.concat(out_frames, ignore_index=True)
-    # rótulo textual
-    out["cluster_label"] = out["cluster"].map({
-        0: "0 – Ausência de clusterização",
-        1: "1 – Cluster em estágio inicial",
-        2: "2 – Cluster em formação",
-        3: "3 – Clusterizado",
-    })
-    return out
-
- def _load_quadras_min(repo, branch):
-        gdf = st.session_state.get("gdf_quadras_cached")
-        if gdf is None or gdf.empty:
-            gdf = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
-            st.session_state["gdf_quadras_cached"] = gdf
-        sq_col = next((c for c in gdf.columns if str(c).upper() == "SQ"), None)
-        if not sq_col:
-            raise RuntimeError("Camada de quadras não possui coluna 'SQ'.")
-        gmin = gdf[[sq_col, gdf.geometry.name]].copy()
-        gmin["_SQ_norm"] = _norm_sq_series(gmin[sq_col])
-        try:
-            gmin = ensure_wgs84(gmin)
-            gmin["_centroid"] = gmin.geometry.centroid
-        except Exception:
-            gmin["_centroid"] = gmin.geometry
-        return gmin, sq_col
-
+# cluster como código 0..3 quando possível
+def _to_int_code(x):
     try:
-        gdfq_min, sq_col_quadras = _load_quadras_min(repo, branch)
-    except Exception as e:
-        st.error(f"Falha ao carregar quadras: {e}")
-        st.stop()
+        v = float(str(x).strip())
+        if np.isfinite(v) and abs(v-int(v))<1e-9: return int(v)
+    except Exception: pass
+    m = re.search(r"\d+", str(x))
+    return int(m.group(0)) if m else None
+est["_cl_code"] = est[cluster_col].map(_to_int_code).astype("Int64")
 
-    # ==========
-    # ARQUIVO DE VALORES (por SQ) + filtro de ano coerente
-    # ==========
-    ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="t2_vals_ver")
-    base_vals = pick_existing_dir(
-        repo, branch,
-        [f"Data/dados/{'originais' if ver_val=='originais' else 'winsorizados'}",
-         f"Data/dados/{'Originais' if ver_val=='originais' else 'Winsorizados'}",
-         f"Data/dados/{'winsorize' if ver_val!='originais' else 'originais'}"]
+# interseção de anos (ou None)
+if ano_vals and ano_est:
+    anos = sorted(
+        set(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int))
+        & set(pd.to_numeric(est[ano_est],  errors="coerce").dropna().astype(int))
     )
-    vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
-    incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
-    vals_files = [
-        f for f in vals_all
-        if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
-        and not re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
-    ]
-    if not vals_files:
-        st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
-        st.stop()
-    sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
-    vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
-    df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if str(vals_obj["name"]).endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
+elif ano_vals:
+    anos = sorted(pd.to_numeric(vals[ano_vals], errors="coerce").dropna().astype(int).unique().tolist())
+elif ano_est:
+    anos = sorted(pd.to_numeric(est[ano_est], errors="coerce").dropna().astype(int).unique().tolist())
+else:
+    anos = [None]  # sem ano
 
-    sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
-    if sq_col_vals is None:
-        st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
-        st.stop()
-    ano_col_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
-    if ano_col_vals and year_sel is not None:
-        df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
+# selecionar variáveis numéricas válidas
+id_like   = {c for c in vals.columns if str(c).lower() in {"sq","id","codigo","code","_sq_norm"}}
+time_like = {c for c in vals.columns if str(c).lower() in {"ano","year"}}
+num_cols  = [c for c in vals.columns if pd.api.types.is_numeric_dtype(vals[c])]
+var_all   = [c for c in num_cols if c not in (id_like | time_like)]
 
-    # ==========
-    # PRÉ-CARREGAMENTO (cache): métricas por cluster × ano — FILTRADO PELO ANO
-    # ==========
-    # Reduz clusters ao ano selecionado para o cálculo (mais leve)
-    df_est_for_pre = df_est_raw
-    if ano_col_est and (year_sel is not None):
-        df_est_for_pre = df_est_raw[pd.to_numeric(df_est_raw[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
+out_frames = []
 
-    metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}|{year_sel}"
-    df_metrics_all = st.session_state.get(metrics_key)
+for ano in anos:
+    # filtra ano em ambos os lados (quando existir)
+    v = vals if (ano is None or not ano_vals) else vals[pd.to_numeric(vals[ano_vals], errors="coerce").astype("Int64")==ano]
+    e = est  if (ano is None or not ano_est) else est [pd.to_numeric(est [ano_est ], errors="coerce").astype("Int64")==ano]
+    # pega a melhor linha por SQ (caso tenha repetição por merges)
+    e = e.sort_values(["_SQ_norm","_cl_code"]).drop_duplicates("_SQ_norm", keep="last")
 
-    if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
-        try:
-            with st.spinner("Pré-carregando métricas por cluster×ano..."):
-                df_metrics_all = _preload_cluster_metrics_by_year(
-                    df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
-                )
-            st.session_state[metrics_key] = df_metrics_all
-        except MemoryError:
-            st.warning("Pré-cálculo ficou pesado; desative o pré-carregamento ou reduza o número de variáveis.")
-            df_metrics_all = pd.DataFrame()
+    # mapa SQ->cluster
+    mapper = e.set_index("_SQ_norm")["_cl_code"]
 
-    # ======================
-    # MAPA DE CLUSTERIZAÇÃO
-    # ======================
-    st.markdown("### 🗺️ Mapa de clusterização")
-    base_map_t2 = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="t2_base")
-    view_mode = st.radio("Visualização do mapa", ["Mapa geral", "Recorte(s)"], index=0, horizontal=True, key="t2_view")
+    # processa em blocos de variáveis para economizar memória
+    for i in range(0, len(var_all), chunk_size):
+        chunk = var_all[i:i+chunk_size]
+        d = v[["_SQ_norm"] + chunk].copy()
+        d[chunk] = d[chunk].apply(pd.to_numeric, errors="coerce")
+        d["_cl_code"] = d["_SQ_norm"].map(mapper).astype("Int64")
+        d = d[d["_cl_code"].isin([0,1,2,3])]  # clusters conhecidos
 
-    gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
-    if gdf_map.empty:
-        st.info("Não há feições para mapear após o JOIN de quadras × clusters.")
-    else:
-        # amostragem para acelerar
-        if len(gdf_map) > max_feat:
-            gdf_map = gdf_map.sample(n=max_feat, random_state=42)
+        if d.empty:
+            continue
 
-        # simplificação opcional (só polígonos)
-        if (not fast_map) and simplify_tol and simplify_tol > 0:
-            try:
-                gdf_map = gdf_map.copy()
-                gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
-            except Exception:
-                pass
+        g = d.groupby("_cl_code", observed=True)
 
-        palette = pick_categorical(4)
+        n_df     = g[chunk].count()
+        miss_df  = pd.DataFrame(g.size().values[:,None] - n_df.values, index=n_df.index, columns=chunk)
+        mean_df  = g[chunk].mean()
+        med_df   = g[chunk].median()
+        std_df   = g[chunk].std(ddof=1)
+        min_df   = g[chunk].min()
+        max_df   = g[chunk].max()
+        q_df     = g[chunk].quantile([0.25, 0.75])
+        p25_df   = q_df.xs(0.25, level=1)
+        p75_df   = q_df.xs(0.75, level=1)
+        cv_df    = std_df/mean_df
 
-        def _geojson_colored(gdf_in, use_centroid: bool):
-            import geopandas as gpd
-            geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
-            gg = gpd.GeoDataFrame(
-                gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
-                geometry="geometry",
-                crs=getattr(gdf_in, "crs", 4326)
+        def _to_long(name, df_):
+            return (
+                df_.stack()
+                   .rename(name)
+                   .reset_index()
+                   .rename(columns={"_cl_code":"cluster","level_1":"variavel"})
             )
-            gj = make_geojson(gg)
-            for feat in gj.get("features", []):
-                cl_raw = feat.get("properties", {}).get("_cl_code", None)
-                cl = _safe_int(cl_raw, {0, 1, 2, 3})
-                hexc = palette[cl] if cl is not None else "#999999"
-                feat.setdefault("properties", {})
-                feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
-                feat["properties"]["name"] = f"Cluster {cl}" if cl is not None else "Cluster indef."
-                feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
-            return gj
 
-        def _draw_map(layers):
-            if base_map_t2.startswith("Satélite"):
-                deck(layers, satellite=True)
-            else:
-                osm_basemap_deck(layers)
+        parts = [
+            _to_long("n",             n_df),
+            _to_long("missings",      miss_df),
+            _to_long("media",         mean_df),
+            _to_long("mediana",       med_df),
+            _to_long("desvio_padrao", std_df),
+            _to_long("p25",           p25_df),
+            _to_long("p75",           p75_df),
+            _to_long("minimo",        min_df),
+            _to_long("maximo",        max_df),
+            _to_long("coef_var",      cv_df),
+        ]
+        merged = parts[0]
+        for p in parts[1:]:
+            merged = merged.merge(p, on=["cluster","variavel"], how="left")
+        merged.insert(0, "ano", ano)
+        out_frames.append(merged)
 
-        if view_mode == "Mapa geral":
-            colL, colC, colR = st.columns([0.08, 0.84, 0.08])
-            with colC:
-                gj = _geojson_colored(gdf_map, use_centroid=fast_map)
-                lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
-                _draw_map([lyr])
-            st.markdown("**Legenda — clusters**")
-            for c in [0, 1, 2, 3]:
-                _legend_row(palette[c], label_map[c])
+if not out_frames:
+    return pd.DataFrame(columns=["ano","cluster","variavel","n","missings","media","mediana","desvio_padrao","p25","p75","minimo","maximo","coef_var"])
 
+out = pd.concat(out_frames, ignore_index=True)
+# rótulo textual
+out["cluster_label"] = out["cluster"].map({
+    0: "0 – Ausência de clusterização",
+    1: "1 – Cluster em estágio inicial",
+    2: "2 – Cluster em formação",
+    3: "3 – Clusterizado",
+})
+return out
+
+def _load_quadras_min(repo, branch):
+    gdf = st.session_state.get("gdf_quadras_cached")
+    if gdf is None or gdf.empty:
+        gdf = load_gpkg(repo, "Data/mapa/quadras.gpkg", branch)
+        st.session_state["gdf_quadras_cached"] = gdf
+    sq_col = next((c for c in gdf.columns if str(c).upper() == "SQ"), None)
+    if not sq_col:
+        raise RuntimeError("Camada de quadras não possui coluna 'SQ'.")
+    gmin = gdf[[sq_col, gdf.geometry.name]].copy()
+    gmin["_SQ_norm"] = _norm_sq_series(gmin[sq_col])
+    try:
+        gmin = ensure_wgs84(gmin)
+        gmin["_centroid"] = gmin.geometry.centroid
+    except Exception:
+        gmin["_centroid"] = gmin.geometry
+    return gmin, sq_col
+
+try:
+    gdfq_min, sq_col_quadras = _load_quadras_min(repo, branch)
+except Exception as e:
+    st.error(f"Falha ao carregar quadras: {e}")
+    st.stop()
+
+# ==========
+# ARQUIVO DE VALORES (por SQ) + filtro de ano coerente
+# ==========
+ver_val = st.radio("Versão dos dados (valores por SQ)", ["originais", "winsorizados"], horizontal=True, key="t2_vals_ver")
+base_vals = pick_existing_dir(
+    repo, branch,
+    [f"Data/dados/{'originais' if ver_val=='originais' else 'winsorizados'}",
+     f"Data/dados/{'Originais' if ver_val=='originais' else 'Winsorizados'}",
+     f"Data/dados/{'winsorize' if ver_val!='originais' else 'originais'}"]
+)
+vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
+incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
+vals_files = [
+    f for f in vals_all
+    if (incl_pred or not str(f["name"]).lower().startswith("pred_"))
+    and not re.search(r"(?i)est[aá]gio.*cluster", str(f["name"]))
+]
+if not vals_files:
+    st.info(f"Nenhum arquivo elegível em `{base_vals}` (excluí EstagioClusterizacao.* e, opcionalmente, pred_*).")
+    st.stop()
+sel_vals = st.selectbox("Arquivo de valores (por SQ)", [f["name"] for f in vals_files], index=0, key="t2_vals_file")
+vals_obj = next(x for x in vals_files if x["name"] == sel_vals)
+df_vals_raw = load_parquet(repo, vals_obj["path"], branch) if str(vals_obj["name"]).endswith(".parquet") else load_csv(repo, vals_obj["path"], branch)
+
+sq_col_vals = next((c for c in df_vals_raw.columns if str(c).upper() == "SQ"), None)
+if sq_col_vals is None:
+    st.error("O arquivo de valores precisa ter a coluna 'SQ'.")
+    st.stop()
+ano_col_vals = next((c for c in df_vals_raw.columns if str(c).lower() in ("ano", "year")), None)
+if ano_col_vals and year_sel is not None:
+    df_vals_raw = df_vals_raw[pd.to_numeric(df_vals_raw[ano_col_vals], errors="coerce").astype("Int64") == year_sel].copy()
+
+# ==========
+# PRÉ-CARREGAMENTO (cache): métricas por cluster × ano — FILTRADO PELO ANO
+# ==========
+# Reduz clusters ao ano selecionado para o cálculo (mais leve)
+df_est_for_pre = df_est_raw
+if ano_col_est and (year_sel is not None):
+    df_est_for_pre = df_est_raw[pd.to_numeric(df_est_raw[ano_col_est], errors="coerce").astype("Int64") == year_sel].copy()
+
+metrics_key = f"t2_metrics_{repo}@{branch}|{vals_obj['path']}|{source_label}|{cluster_col}|{year_sel}"
+df_metrics_all = st.session_state.get(metrics_key)
+
+if preload_toggle and (df_metrics_all is None or df_metrics_all.empty):
+    try:
+        with st.spinner("Pré-carregando métricas por cluster×ano..."):
+            df_metrics_all = _preload_cluster_metrics_by_year(
+                df_vals_raw, df_est_for_pre, cluster_col, chunk_size=max_vars
+            )
+        st.session_state[metrics_key] = df_metrics_all
+    except MemoryError:
+        st.warning("Pré-cálculo ficou pesado; desative o pré-carregamento ou reduza o número de variáveis.")
+        df_metrics_all = pd.DataFrame()
+
+# ======================
+# MAPA DE CLUSTERIZAÇÃO
+# ======================
+st.markdown("### 🗺️ Mapa de clusterização")
+base_map_t2 = st.radio("Plano de fundo", ["OpenStreetMap", "Satélite (Mapbox)"], index=0, horizontal=True, key="t2_base")
+view_mode = st.radio("Visualização do mapa", ["Mapa geral", "Recorte(s)"], index=0, horizontal=True, key="t2_view")
+
+gdf_map = gdfq_min.merge(df_est_clean, on="_SQ_norm", how="inner").copy()
+if gdf_map.empty:
+    st.info("Não há feições para mapear após o JOIN de quadras × clusters.")
+else:
+    # amostragem para acelerar
+    if len(gdf_map) > max_feat:
+        gdf_map = gdf_map.sample(n=max_feat, random_state=42)
+
+    # simplificação opcional (só polígonos)
+    if (not fast_map) and simplify_tol and simplify_tol > 0:
+        try:
+            gdf_map = gdf_map.copy()
+            gdf_map[gdf_map.geometry.name] = gdf_map.geometry.simplify(simplify_tol, preserve_topology=True)
+        except Exception:
+            pass
+
+    palette = pick_categorical(4)
+
+    def _geojson_colored(gdf_in, use_centroid: bool):
+        import geopandas as gpd
+        geom_col = "_centroid" if use_centroid else gdf_in.geometry.name
+        gg = gpd.GeoDataFrame(
+            gdf_in[[geom_col, "_cl_code"]].rename(columns={geom_col: "geometry"}),
+            geometry="geometry",
+            crs=getattr(gdf_in, "crs", 4326)
+        )
+        gj = make_geojson(gg)
+        for feat in gj.get("features", []):
+            cl_raw = feat.get("properties", {}).get("_cl_code", None)
+            cl = _safe_int(cl_raw, {0, 1, 2, 3})
+            hexc = palette[cl] if cl is not None else "#999999"
+            feat.setdefault("properties", {})
+            feat["properties"]["fill_color"] = hex_to_rgba(hexc, 180 if use_centroid else 150)
+            feat["properties"]["name"] = f"Cluster {cl}" if cl is not None else "Cluster indef."
+            feat["properties"]["value"] = label_map.get(cl, str(cl_raw))
+        return gj
+
+    def _draw_map(layers):
+        if base_map_t2.startswith("Satélite"):
+            deck(layers, satellite=True)
         else:
-            # Recortes lado a lado
-            rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
-            rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
-            if not rec_files:
-                st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
-            else:
-                rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2rec_file")
-                rec_obj = next(x for x in rec_files if x["name"] == rec_name)
-                gdfrec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
+            osm_basemap_deck(layers)
 
-                # interseção: pega só o que cai no recorte
-                try:
-                    import geopandas as gpd
-                    gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
-                    gq = ensure_wgs84(gq)
-                    gr = ensure_wgs84(gdfrec)[["geometry"]]
-                    sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
-                    gdf_sub = gdf_map.loc[sel_idx].copy()
-                except Exception:
-                    bbox = gdfrec.total_bounds
-                    gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+    if view_mode == "Mapa geral":
+        colL, colC, colR = st.columns([0.08, 0.84, 0.08])
+        with colC:
+            gj = _geojson_colored(gdf_map, use_centroid=fast_map)
+            lyr = render_point_layer(gj, "clusters (centróides)") if fast_map else render_geojson_layer(gj, "clusters")
+            _draw_map([lyr])
+        st.markdown("**Legenda — clusters**")
+        for c in [0, 1, 2, 3]:
+            _legend_row(palette[c], label_map[c])
 
-                gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
-                lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
-                lyr_brd = render_line_layer(make_geojson(gdfrec), "borda recorte")
+    else:
+        # Recortes lado a lado
+        rec_dir = pick_existing_dir(repo, branch, ["Data/mapa/recortes", "data/mapa/recortes", "Data/Mapa/recortes"])
+        rec_files = list_files(repo, rec_dir, branch, (".gpkg",))
+        if not rec_files:
+            st.info("Nenhum GPKG de recorte encontrado em `Data/mapa/recortes`.")
+        else:
+            rec_name = st.selectbox("Recorte (.gpkg)", [f["name"] for f in rec_files], index=0, key="t2rec_file")
+            rec_obj = next(x for x in rec_files if x["name"] == rec_name)
+            gdfrec = ensure_wgs84(load_gpkg(repo, rec_obj["path"], branch))
 
-                c1, c2 = st.columns([1.6, 1], gap="large")
-                with c1:
-                    _draw_map([lyr_sub, lyr_brd])
-                with c2:
-                    st.markdown("**Legenda — clusters**")
-                    for c in [0, 1, 2, 3]:
-                        _legend_row(palette[c], label_map[c])
-                    st.metric("Feições no recorte", len(gdf_sub))
+            # interseção: pega só o que cai no recorte
+            try:
+                import geopandas as gpd
+                gq = gpd.GeoDataFrame(gdf_map[[gdf_map.geometry.name]], geometry=gdf_map.geometry.name, crs=getattr(gdf_map, "crs", 4326))
+                gq = ensure_wgs84(gq)
+                gr = ensure_wgs84(gdfrec)[["geometry"]]
+                sel_idx = gpd.sjoin(gq, gr, predicate="intersects", how="inner").index.unique()
+                gdf_sub = gdf_map.loc[sel_idx].copy()
+            except Exception:
+                bbox = gdfrec.total_bounds
+                gdf_sub = gdf_map.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+
+            gj_sub = _geojson_colored(gdf_sub, use_centroid=fast_map)
+            lyr_sub = render_point_layer(gj_sub, "recorte") if fast_map else render_geojson_layer(gj_sub, "recorte")
+            lyr_brd = render_line_layer(make_geojson(gdfrec), "borda recorte")
+
+            c1, c2 = st.columns([1.6, 1], gap="large")
+            with c1:
+                _draw_map([lyr_sub, lyr_brd])
+            with c2:
+                st.markdown("**Legenda — clusters**")
+                for c in [0, 1, 2, 3]:
+                    _legend_row(palette[c], label_map[c])
+                st.metric("Feições no recorte", len(gdf_sub))
 
 def _load_clusters(repo, branch) -> tuple[pd.DataFrame, str] | tuple[None, str]:
         try:
@@ -3560,6 +3560,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
