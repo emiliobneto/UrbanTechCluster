@@ -270,25 +270,20 @@ def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
 
 @st.cache_data(show_spinner=True)
 def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
-    """Lê GPKG direto do GitHub."""
-    try:
-        import geopandas as gpd
-    except Exception as e:
-        raise RuntimeError("geopandas/pyogrio são necessários para ler GPKG.") from e
+    import geopandas as gpd
     blob = github_fetch_bytes(ownerrepo, path, branch)
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
-        tmp.write(blob)
-        tmp.flush()
-        tmp_path = tmp.name
+        tmp.write(blob); tmp.flush(); tmp_path = tmp.name
     try:
+        # força pyogrio; se não tiver, mostra erro claro
         return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")
-    except Exception:
-        return gpd.read_file(tmp_path, layer=layer)
+    except Exception as e:
+        raise RuntimeError(
+            "Falha lendo GPKG com pyogrio. Certifique-se de instalar 'pyogrio'."
+        ) from e
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        try: os.unlink(tmp_path)
+        except Exception: pass
 
 
 @st.cache_data(show_spinner=True)
@@ -3816,6 +3811,7 @@ with tab5:
                          x="rank_medio_entre_pastas", y=model_col, orientation="h",
                          title=f"Ranking médio ({m}) — menor é melhor")
             st.plotly_chart(fig, use_container_width=True)
+
 
 
 
