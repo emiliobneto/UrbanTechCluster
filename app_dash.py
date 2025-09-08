@@ -1,16 +1,256 @@
-# simple_io.py
+
 from __future__ import annotations
 import io, os, json, tempfile, re
-from typing import Iterable, Sequence, Any, Dict
+from typing import Iterable, Sequence, Any, Dict, List, Optional, Tuple
 import requests
 import pandas as pd
 import streamlit as st
 import numpy as np
 import plotly.express as px
-
+import geopandas as gpd
 
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
+
+# =========================
+# FASE 0 — CONFIGURAÇÃO
+# =========================
+
+def _root_dir() -> Path:
+    # Streamlit define __file__, mas deixamos um fallback para segurança.
+    try:
+        return Path(__file__).resolve().parent
+    except NameError:
+        return Path.cwd()
+
+ROOT = _root_dir()
+DATA = ROOT / "Data"                       # <- D maiúsculo!
+DADOS = DATA / "dados" / "Originais"
+MAPA = DATA / "mapa"
+RECORTES = MAPA / "recortes"
+
+def must_exist(p: Path) -> Path:
+    if not p.exists():
+        st.error(f"Arquivo/pasta não encontrado: `{p}`")
+        st.stop()
+    return p
+
+@st.cache_data(show_spinner=False)
+def ler_parquet(path: str | Path) -> pd.DataFrame:
+    p = Path(path)
+    try:
+        return pd.read_parquet(p)
+    except Exception as e:
+        st.exception(e)
+        st.stop()
+
+@st.cache_data(show_spinner=False)
+def ler_gpkg(path: str | Path, layer: Optional[str] = None) -> gpd.GeoDataFrame:
+    p = Path(path)
+    # Preferir pyogrio (sem GDAL) no Streamlit Cloud
+    engine = "pyogrio"
+    try:
+        gdf = gpd.read_file(p, layer=layer, engine=engine)
+    except Exception:
+        # fallback para engine padrão se pyogrio não estiver disponível
+        gdf = gpd.read_file(p, layer=layer)
+    # Para visualização no mapa (WGS84)
+    try:
+        gdf = gdf.to_crs(4326)
+    except Exception:
+        pass
+    return gdf
+
+def listar_layers_gpkg(p: Path) -> List[str]:
+    try:
+        import pyogrio  # type: ignore
+        return [name for name, _, _ in pyogrio.list_layers(p)]
+    except Exception:
+        # fallback (pode não listar em todos ambientes)
+        try:
+            import fiona  # type: ignore
+            with fiona.Env():
+                with fiona.open(p) as src:
+                    return [src.name]
+        except Exception:
+            return []
+
+def sanitize_df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    """Evita erro 'Unexpected = ...' quando alguma célula começa com '='."""
+    df2 = df.copy()
+    for col in df2.columns:
+        if pd.api.types.is_object_dtype(df2[col]):
+            df2[col] = (
+                df2[col]
+                .astype(str)
+                .str.replace(r"^=", "'=", regex=True)  # prefixa ' para não virar função JS
+            )
+    return df2
+
+def add_lon_lat_from_geometry(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if "geometry" in gdf:
+        # centroid seguro (não altera geometria original)
+        cent = gdf.geometry.centroid
+        gdf = gdf.copy()
+        gdf["lon"] = cent.x
+        gdf["lat"] = cent.y
+    return gdf
+
+def preview_df(df: pd.DataFrame, caption: str):
+    df = sanitize_df_for_streamlit(df)
+    st.data_editor(
+        df,
+        use_container_width=True,
+        height=min(500, 100 + 28 * min(12, len(df))),
+        disabled=True,
+        key=f"preview_{caption}",
+    )
+    st.caption(caption)
+
+def ver_mapa(gdf: gpd.GeoDataFrame, titulo: str, color_by: Optional[str] = None):
+    import pydeck as pdk
+
+    gdf = add_lon_lat_from_geometry(gdf.dropna(subset=["geometry"]))
+    if gdf.empty:
+        st.warning("Camada vazia após cálculo de centroid.")
+        return
+
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=gdf,
+        get_position="[lon, lat]",
+        get_radius=25,
+        pickable=True,
+        get_fill_color="[255, 140, 0]" if color_by is None else None,
+    )
+
+    deck = pdk.Deck(
+        initial_view_state=pdk.ViewState(
+            latitude=float(gdf["lat"].mean()),
+            longitude=float(gdf["lon"].mean()),
+            zoom=11,
+        ),
+        layers=[layer],
+        tooltip={"text": "{lon}, {lat}"},
+    )
+    st.pydeck_chart(deck, use_container_width=True)
+    st.caption(titulo)
+
+def painel_debug():
+    st.subheader("Debug rápido")
+    st.code(f"ROOT     = {ROOT}")
+    st.code(f"DATA     = {DATA.exists()} -> {DATA}")
+    st.code(f"DADOS    = {DADOS.exists()} -> {DADOS}")
+    st.code(f"MAPA     = {MAPA.exists()} -> {MAPA}")
+    if MAPA.exists():
+        st.write("Arquivos em `Data/mapa`:", [p.name for p in MAPA.glob("*")])
+
+# =========================
+# FASE 1 — VARIÁVEIS (PARQUET)
+# =========================
+
+def fase_1_carregar_variaveis() -> Dict[str, pd.DataFrame]:
+    must_exist(DADOS)
+    # Carrega todos os pred_*.parquet automaticamente
+    arquivos = sorted(DADOS.glob("pred_*.parquet"))
+    if not arquivos:
+        st.warning("Nenhum `pred_*.parquet` encontrado em Data/dados/Originais.")
+    dfs: Dict[str, pd.DataFrame] = {}
+    for p in arquivos:
+        dfs[p.stem] = ler_parquet(p)
+    return dfs
+
+# =========================
+# FASE 2 — MAPAS (GPKG)
+# =========================
+
+def fase_2_carregar_mapas() -> Dict[str, gpd.GeoDataFrame]:
+    must_exist(MAPA)
+    # Lista principal de pacotes .gpkg
+    candidatos = [
+        MAPA / "quadras.gpkg",
+        MAPA / "linhas_trem_e_metro.gpkg",
+        MAPA / "estacoes_trem_e_metro.gpkg",
+    ]
+    # Também pega todos .gpkg dentro de recortes/
+    if RECORTES.exists():
+        candidatos.extend(sorted(RECORTES.glob("*.gpkg")))
+
+    gdfs: Dict[str, gpd.GeoDataFrame] = {}
+    for gpkg in candidatos:
+        if gpkg.exists():
+            # Se houver várias layers, lê a primeira por padrão
+            layers = listar_layers_gpkg(gpkg)
+            layer = layers[0] if layers else None
+            gdfs[gpkg.stem] = ler_gpkg(gpkg, layer=layer)
+    if not gdfs:
+        st.warning("Nenhum .gpkg encontrado em Data/mapa.")
+    return gdfs
+
+# =========================
+# FASE 3 — VISUALIZAÇÃO TABULAR
+# =========================
+
+def fase_3_preview_tabelas(dfs: Dict[str, pd.DataFrame], max_rows: int = 500):
+    st.header("Pré-visualização de variáveis")
+    if not dfs:
+        st.info("Nenhum DataFrame carregado.")
+        return
+    nome = st.selectbox("Escolha uma tabela", list(dfs.keys()))
+    df = dfs[nome].head(max_rows)
+    preview_df(df, caption=f"{nome} (primeiras {len(df)} linhas)")
+
+# =========================
+# FASE 4 — VISUALIZAÇÃO NO MAPA
+# =========================
+
+def fase_4_preview_mapa(gdfs: Dict[str, gpd.GeoDataFrame]):
+    st.header("Visualização de mapas")
+    if not gdfs:
+        st.info("Nenhuma camada geográfica carregada.")
+        return
+    nome = st.selectbox("Escolha uma camada", list(gdfs.keys()))
+    gdf = gdfs[nome]
+    ver_mapa(gdf, titulo=nome)
+
+# =========================
+# FASE 5 — DEBUG
+# =========================
+
+def fase_5_debug():
+    with st.expander("Abrir painel de debug"):
+        painel_debug()
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+    st.set_page_config(page_title="UrbanTechCluster — Visualização", layout="wide")
+    st.title("UrbanTechCluster — Variáveis e Mapas")
+
+    # Fase 0: checagens de caminho
+    must_exist(DATA)
+    must_exist(DADOS)
+    must_exist(MAPA)
+
+    # Fase 1: variáveis (.parquet)
+    dfs = fase_1_carregar_variaveis()
+
+    # Fase 2: mapas (.gpkg)
+    gdfs = fase_2_carregar_mapas()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        fase_3_preview_tabelas(dfs)
+    with col2:
+        fase_4_preview_mapa(gdfs)
+
+    # Fase 5: debug
+    fase_5_debug()
+
+if __name__ == "__main__":
+    main()
 
 
 # -------------------- secrets / headers --------------------
@@ -1003,3 +1243,4 @@ with tab4:
 
 with tab5:
     render_tab5(repo or "", branch)
+
