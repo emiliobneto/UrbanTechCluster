@@ -2243,7 +2243,7 @@ with tab1:
     sq_col_quadras = "SQ" if "SQ" in gdf_quadras.columns else next((c for c in gdf_quadras.columns if str(c).upper() == "SQ"), None)
     if not sq_col_quadras:
         st.error("Camada de quadras não possui coluna 'SQ'.")
-        return
+        st.stop()
 
     # ---------------- Camadas auxiliares (opcional) ----------------
     loaded_layers, other_layers_paths = [], []
@@ -3483,6 +3483,7 @@ with tab5:
                                      x="rank_medio_entre_pastas", y=model_col, orientation="h",
                                      title=f"Ranking médio ({m}) — menor é melhor")
                         st.plotly_chart(fig, use_container_width=True)
+
 
 
 
