@@ -40,11 +40,13 @@ def _http():
     return s
 
 def _gh_blocked() -> bool:
-    """Evita tempestade de retries quando rate-limited: bloqueia por um curto período."""
     now = pd.Timestamp.utcnow().timestamp()
+    if bool(st.session_state.get("_offline_mode", False)):
+        return True
     return now < float(st.session_state.get("_gh_block_until", 0))
 
 def _gh_set_block(seconds: int = 120):
+    """(mantém igual) Marca um período de bloqueio para evitar tempestade de retries."""
     st.session_state["_gh_block_until"] = pd.Timestamp.utcnow().timestamp() + seconds
 
 
@@ -242,12 +244,27 @@ def github_repo_info(owner_repo: str):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def github_listdir(ownerrepo: str, path: str, branch: str):
-    if _gh_blocked(): return []  # retorna vazio para não loopar
+    if _gh_blocked():
+        p = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        if os.path.isdir(p):
+            out = []
+            for nm in sorted(os.listdir(p)):
+                full = os.path.join(p, nm)
+                out.append({
+                    "type": "dir" if os.path.isdir(full) else "file",
+                    "name": nm,
+                    "path": f"{path.rstrip('/')}/{nm}".replace("\\", "/"),
+                })
+            return out
+        return []
+
+    # API GitHub
     ownerrepo = normalize_repo(ownerrepo)
     url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
     r = _http().get(url, timeout=15)
     if r.status_code in (403, 429):
-        _gh_set_block(120); return []
+        _gh_set_block(120)
+        return []
     if r.status_code != 200:
         return []
     return r.json()
@@ -277,16 +294,32 @@ def github_branch_info(ownerrepo: str, branch: str):
 
 @st.cache_data(show_spinner=True, ttl=600)
 def github_tree_paths(ownerrepo: str, branch: str):
-    if _gh_blocked(): return []
+    """
+    Caminhos (arquivos) do repositório:
+      - OFFLINE/bloqueado → varre o diretório local (os.walk).
+      - ONLINE → usa git/trees?recursive=1.
+    Retorna lista de strings com separador '/'.
+    """
+    if _gh_blocked():
+        base = os.getcwd()
+        out = []
+        for root, _dirs, files in os.walk(base):
+            for f in files:
+                rel = os.path.relpath(os.path.join(root, f), base).replace("\\", "/")
+                out.append(rel)
+        return out
+
     info = github_branch_info(ownerrepo, branch)
     tree_sha = info["commit"]["commit"]["tree"]["sha"]
     r = _http().get(f"{API_BASE}/repos/{normalize_repo(ownerrepo)}/git/trees/{tree_sha}?recursive=1", timeout=30)
     if r.status_code in (403, 429):
-        _gh_set_block(120); return []
+        _gh_set_block(120)
+        return []
     if r.status_code != 200:
         return []
     tree = r.json().get("tree", [])
     return [ent["path"] for ent in tree if ent.get("type") == "blob"]
+
 
 def resolve_branch(owner_repo: str, user_branch: str | None):
     owner_repo = normalize_repo(owner_repo)
@@ -300,13 +333,78 @@ def resolve_branch(owner_repo: str, user_branch: str | None):
     except Exception:
         return user_branch or "main"
 
-# ==== PATCH B2 — fetch de bytes robusto: prefere API RAW quando há token; TTL e detecção de HTML/LFS ====
 @st.cache_data(show_spinner=True, ttl=600)
 def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
-    if _gh_blocked(): raise RuntimeError("Acesso ao GitHub temporariamente bloqueado.")
+    if _gh_blocked():
+        local = _read_local_bytes(path)
+        if local is not None:
+            return local
+        raise RuntimeError(
+            "Acesso ao GitHub temporariamente bloqueado e arquivo local não encontrado: "
+            f"{path}. Desative OFFLINE ou disponibilize o arquivo local."
+        )
+
     ownerrepo = normalize_repo(ownerrepo)
     token = _secret(["github", "token"], None)
     data = None
+
+    if token:
+        url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
+        hdrs = {"Accept": "application/vnd.github.v3.raw"}
+        r = _http().get(url, headers=hdrs, timeout=20)
+        if r.status_code == 200:
+            data = r.content
+        elif r.status_code in (403, 429):
+            _gh_set_block(120)
+            raise RuntimeError("Rate limit ao baixar arquivo (API raw).")
+        # caso contrário, segue para fallback público
+
+    # 3) RAW público
+    if data is None:
+        download_url = build_raw_url(ownerrepo, path, branch)
+        r = _http().get(download_url, timeout=20)
+
+        # 4) Fallback via contents → download_url
+        if r.status_code != 200:
+            try:
+                meta = github_get_contents(ownerrepo, path, branch)
+                dl = meta.get("download_url")
+                if dl:
+                    r = _http().get(dl, timeout=20)
+            except Exception:
+                pass
+
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"Download falhou ({r.status_code}). Se o repo for privado, defina st.secrets['github']['token']."
+            )
+
+        data = r.content
+
+    # Sanitização: HTML e ponteiro LFS
+    head = data[:200].strip().lower()
+    if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+        _gh_set_block(120)
+        raise RuntimeError("Recebi HTML em vez do arquivo (provável rate limit/repo privado).")
+    if data.startswith(b"version https://git-lfs.github.com/spec"):
+        raise RuntimeError("Arquivo em Git LFS (ponteiro). Use token e leia via API RAW.")
+
+    return data
+    
+def _read_local_bytes(rel_path: str) -> bytes | None:
+    """
+    Lê um arquivo do disco a partir do caminho relativo do repo (ex.: 'Data/mapa/quadras.gpkg').
+    Retorna bytes ou None se não existir.
+    """
+    try:
+        p = rel_path if os.path.isabs(rel_path) else os.path.join(os.getcwd(), rel_path)
+        if os.path.exists(p) and os.path.isfile(p):
+            with open(p, "rb") as f:
+                return f.read()
+    except Exception:
+        pass
+    return None
+
 
     # 1) Com token → usa API RAW (funciona em repo privado)
     if token:
@@ -354,17 +452,34 @@ def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
 
 @st.cache_data(show_spinner=True, ttl=600)
 def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
-    import geopandas as gpd
+    try:
+        import geopandas as gpd  # noqa
+    except Exception as e:
+        raise RuntimeError("geopandas é necessário para ler GPKG.") from e
+
+    # 1) OFFLINE → local
+    if _gh_blocked():
+        b = _read_local_bytes(path)
+        if b is None:
+            raise RuntimeError(f"OFFLINE: arquivo local não encontrado: {path}")
+        with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+            tmp.write(b); tmp.flush(); tmp_path = tmp.name
+        try:
+            return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")
+        except Exception as e:
+            raise RuntimeError("Falha lendo GPKG local com pyogrio. Instale 'pyogrio'.") from e
+        finally:
+            try: os.unlink(tmp_path)
+            except Exception: pass
+
+    # 2) ONLINE → bytes do GitHub
     blob = github_fetch_bytes(ownerrepo, path, branch)
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
         tmp.write(blob); tmp.flush(); tmp_path = tmp.name
     try:
-        # força pyogrio; se não tiver, mostra erro claro
         return gpd.read_file(tmp_path, layer=layer, engine="pyogrio")
     except Exception as e:
-        raise RuntimeError(
-            "Falha lendo GPKG com pyogrio. Certifique-se de instalar 'pyogrio'."
-        ) from e
+        raise RuntimeError("Falha lendo GPKG com pyogrio. Certifique-se de instalar 'pyogrio'.") from e
     finally:
         try: os.unlink(tmp_path)
         except Exception: pass
@@ -372,12 +487,26 @@ def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
 
 @st.cache_data(show_spinner=True, ttl=600)
 def load_parquet(ownerrepo: str, path: str, branch: str) -> pd.DataFrame:
+    if _gh_blocked():
+        b = _read_local_bytes(path)
+        if b is None:
+            raise RuntimeError(f"OFFLINE: arquivo local não encontrado: {path}")
+        return pd.read_parquet(io.BytesIO(b), engine="pyarrow")
+
+    # ONLINE
     blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
 
 
 @st.cache_data(show_spinner=True, ttl=600)
 def load_csv(ownerrepo: str, path: str, branch: str) -> pd.DataFrame:
+    if _gh_blocked():
+        b = _read_local_bytes(path)
+        if b is None:
+            raise RuntimeError(f"OFFLINE: arquivo local não encontrado: {path}")
+        return pd.read_csv(io.BytesIO(b), usecols=lambda c: not str(c).startswith("Unnamed"))
+
+    # ONLINE
     blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_csv(io.BytesIO(blob), usecols=lambda c: not str(c).startswith("Unnamed"))
 
@@ -3547,6 +3676,7 @@ with tab5:
                                      x="rank_medio_entre_pastas", y=model_col, orientation="h",
                                      title=f"Ranking médio ({m}) — menor é melhor")
                         st.plotly_chart(fig, use_container_width=True)
+
 
 
 
