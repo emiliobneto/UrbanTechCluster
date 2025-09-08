@@ -5,9 +5,13 @@ plotly==5.22.0
 pydeck==0.9.1
 pyarrow==16.1.0
 shapely==2.0.4
-pyproj==3.5.0           # <- downgrade proposital p/ wheel super estável em Py311
-geopandas==0.14.4
 pyogrio==0.9.0
 mapclassify==2.6.0
 requests==2.32.3
 scikit-learn==1.5.1
+scipy==1.13.1
+statsmodels==0.14.2
+geopandas==1.0.1
+pyproj==3.6.1
+folium==0.16.0
+streamlit-folium==0.21.0
