@@ -14,6 +14,39 @@ import streamlit as st
 import plotly.express as px
 import unicodedata
 import ast
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+# ==== PATCH A — HTTP session com retry/backoff e User-Agent ====
+@st.cache_resource
+def _http():
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=8)
+    s.mount("https://", adapter); s.mount("http://", adapter)
+    s.headers.update({"User-Agent": "UrbanTechClusters-Streamlit/1.0"})
+    token = _secret(["github", "token"], None)
+    if token:
+        s.headers["Authorization"] = f"Bearer {token}"
+    return s
+
+def _gh_blocked() -> bool:
+    """Evita tempestade de retries quando rate-limited: bloqueia por um curto período."""
+    now = pd.Timestamp.utcnow().timestamp()
+    return now < float(st.session_state.get("_gh_block_until", 0))
+
+def _gh_set_block(seconds: int = 120):
+    st.session_state["_gh_block_until"] = pd.Timestamp.utcnow().timestamp() + seconds
+
 
 # ---- SciPy (opcional; com fallback seguro) ----
 try:
@@ -195,30 +228,123 @@ def normalize_repo(owner_repo: str) -> str:
     return f"{parts[0]}/{parts[1]}"
 
 
-@st.cache_data(show_spinner=True)
+# ==== PATCH B1 — helpers GET JSON com TTL e bloqueio quando rate-limited ====
+@st.cache_data(show_spinner=True, ttl=600)
 def github_repo_info(owner_repo: str):
+    if _gh_blocked(): raise RuntimeError("Acesso ao GitHub temporariamente bloqueado.")
     owner_repo = normalize_repo(owner_repo)
-    url = f"{API_BASE}/repos/{owner_repo}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
+    r = _http().get(f"{API_BASE}/repos/{owner_repo}", timeout=15)
+    if r.status_code in (403, 429):
+        _gh_set_block(120); raise RuntimeError("Rate limit do GitHub atingido (repos).")
     if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text}")
+        raise RuntimeError(f"Falha lendo repo {owner_repo}: {r.status_code} {r.text[:200]}")
     return r.json()
 
+@st.cache_data(show_spinner=False, ttl=600)
+def github_listdir(ownerrepo: str, path: str, branch: str):
+    if _gh_blocked(): return []  # retorna vazio para não loopar
+    ownerrepo = normalize_repo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
+    r = _http().get(url, timeout=15)
+    if r.status_code in (403, 429):
+        _gh_set_block(120); return []
+    if r.status_code != 200:
+        return []
+    return r.json()
+
+@st.cache_data(show_spinner=True, ttl=600)
+def github_get_contents(ownerrepo: str, path: str, branch: str):
+    if _gh_blocked(): raise RuntimeError("Acesso ao GitHub temporariamente bloqueado.")
+    ownerrepo = normalize_repo(ownerrepo)
+    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
+    r = _http().get(url, timeout=15)
+    if r.status_code in (403, 429):
+        _gh_set_block(120); raise RuntimeError("Rate limit do GitHub atingido (contents).")
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+@st.cache_data(show_spinner=True, ttl=600)
+def github_branch_info(ownerrepo: str, branch: str):
+    if _gh_blocked(): raise RuntimeError("Acesso ao GitHub temporariamente bloqueado.")
+    ownerrepo = normalize_repo(ownerrepo)
+    r = _http().get(f"{API_BASE}/repos/{ownerrepo}/branches/{branch}", timeout=15)
+    if r.status_code in (403, 429):
+        _gh_set_block(120); raise RuntimeError("Rate limit do GitHub atingido (branches).")
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+@st.cache_data(show_spinner=True, ttl=600)
+def github_tree_paths(ownerrepo: str, branch: str):
+    if _gh_blocked(): return []
+    info = github_branch_info(ownerrepo, branch)
+    tree_sha = info["commit"]["commit"]["tree"]["sha"]
+    r = _http().get(f"{API_BASE}/repos/{normalize_repo(ownerrepo)}/git/trees/{tree_sha}?recursive=1", timeout=30)
+    if r.status_code in (403, 429):
+        _gh_set_block(120); return []
+    if r.status_code != 200:
+        return []
+    tree = r.json().get("tree", [])
+    return [ent["path"] for ent in tree if ent.get("type") == "blob"]
 
 def resolve_branch(owner_repo: str, user_branch: str | None):
     owner_repo = normalize_repo(owner_repo)
-    b = (user_branch or "").strip()
+    if user_branch:
+        r = _http().get(f"{API_BASE}/repos/{owner_repo}/branches/{user_branch}", timeout=10)
+        if r.status_code == 200:
+            return user_branch
     try:
-        if b:
-            url = f"{API_BASE}/repos/{owner_repo}/branches/{b}"
-            r = requests.get(url, headers=_gh_headers(), timeout=20)
-            if r.status_code == 200:
-                return b
-        info = github_repo_info(owner_repo)  # já com timeout menor
+        info = github_repo_info(owner_repo)
         return info.get("default_branch", "main")
     except Exception:
-        # fallback bem-comportado
-        return b or "main"
+        return user_branch or "main"
+
+# ==== PATCH B2 — fetch de bytes robusto: prefere API RAW quando há token; TTL e detecção de HTML/LFS ====
+@st.cache_data(show_spinner=True, ttl=600)
+def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
+    if _gh_blocked(): raise RuntimeError("Acesso ao GitHub temporariamente bloqueado.")
+    ownerrepo = normalize_repo(ownerrepo)
+    token = _secret(["github", "token"], None)
+    data = None
+
+    # 1) Com token → usa API RAW (funciona em repo privado)
+    if token:
+        url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
+        hdrs = {"Accept": "application/vnd.github.v3.raw"}
+        r = _http().get(url, headers=hdrs, timeout=20)
+        if r.status_code == 200:
+            data = r.content
+        elif r.status_code in (403, 429):
+            _gh_set_block(120); raise RuntimeError("Rate limit ao baixar arquivo (API raw).")
+        # continua para fallback
+
+    # 2) Público → raw.githubusercontent.com
+    if data is None:
+        download_url = build_raw_url(ownerrepo, path, branch)
+        r = _http().get(download_url, timeout=20)
+        if r.status_code != 200:
+            # Último fallback: via contents para obter download_url (público)
+            try:
+                meta = github_get_contents(ownerrepo, path, branch)
+                dl = meta.get("download_url")
+                if dl:
+                    r = _http().get(dl, timeout=20)
+            except Exception:
+                pass
+        if r.status_code != 200:
+            raise RuntimeError(f"Download falhou ({r.status_code}). Se o repo for privado, defina st.secrets['github']['token'].")
+
+        data = r.content
+
+    # 3) Sanitização: bloquear HTML/LFS pointer
+    head = data[:200].strip().lower()
+    if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+        _gh_set_block(120); raise RuntimeError("Recebi HTML em vez do arquivo (provável rate limit/privado).")
+    if data.startswith(b"version https://git-lfs.github.com/spec"):
+        raise RuntimeError("Arquivo em Git LFS (ponteiro). Use token e leia via API RAW.")
+
+    return data
 
 
 def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
@@ -226,51 +352,7 @@ def build_raw_url(ownerrepo: str, path: str, branch: str) -> str:
     path = path.lstrip("/")
     return f"{RAW_BASE}/{ownerrepo}/{branch}/{path}"
 
-
-@st.cache_data(show_spinner=False)
-def github_listdir(ownerrepo: str, path: str, branch: str):
-    ownerrepo = normalize_repo(ownerrepo)
-    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        return []
-    return r.json()
-
-
-@st.cache_data(show_spinner=True)
-def github_get_contents(ownerrepo: str, path: str, branch: str):
-    ownerrepo = normalize_repo(ownerrepo)
-    url = f"{API_BASE}/repos/{ownerrepo}/contents/{path}?ref={branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha listando {path}: {r.status_code} {r.text}")
-    return r.json()
-
-
-@st.cache_data(show_spinner=True)
-def github_fetch_bytes(ownerrepo: str, path: str, branch: str) -> bytes:
-    """Baixa arquivo bruto do repositório (com suporte a private/token)."""
-    meta = github_get_contents(ownerrepo, path, branch)
-    download_url = meta.get("download_url") or build_raw_url(ownerrepo, path, branch)
-    r = requests.get(download_url, headers=_gh_headers(), timeout=180)
-    if r.status_code != 200:
-        ct = r.headers.get("Content-Type", "")
-        raise RuntimeError(
-            f"Download falhou ({r.status_code}, Content-Type={ct}). Verifique token/privacidade."
-        )
-    data = r.content
-    # Ponteiro Git LFS?
-    if data.startswith(b"version https://git-lfs.github.com/spec"):
-        raise RuntimeError(
-            "Arquivo está em LFS (ponteiro). Defina token em st.secrets['github']['token']."
-        )
-    # HTML/JSON inesperado?
-    head = data[:200].strip().lower()
-    if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
-        raise RuntimeError("Recebi HTML em vez do arquivo. Provável rate limit/privado. Defina token.")
-    return data
-
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=600)
 def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
     import geopandas as gpd
     blob = github_fetch_bytes(ownerrepo, path, branch)
@@ -288,13 +370,13 @@ def load_gpkg(ownerrepo: str, path: str, branch: str, layer: str | None = None):
         except Exception: pass
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=600)
 def load_parquet(ownerrepo: str, path: str, branch: str) -> pd.DataFrame:
     blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=600)
 def load_csv(ownerrepo: str, path: str, branch: str) -> pd.DataFrame:
     blob = github_fetch_bytes(ownerrepo, path, branch)
     return pd.read_csv(io.BytesIO(blob), usecols=lambda c: not str(c).startswith("Unnamed"))
@@ -310,29 +392,6 @@ def list_files(ownerrepo: str, path: str, branch: str, exts=(".parquet", ".csv",
             if any(nm.lower().endswith(e) for e in exts):
                 out.append({"path": f"{path.rstrip('/')}/{nm}", "name": nm})
     return out
-
-
-@st.cache_data(show_spinner=True)
-def github_branch_info(ownerrepo: str, branch: str):
-    ownerrepo = normalize_repo(ownerrepo)
-    url = f"{API_BASE}/repos/{ownerrepo}/branches/{branch}"
-    r = requests.get(url, headers=_gh_headers(), timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo branch {branch}: {r.status_code} {r.text}")
-    return r.json()
-
-
-@st.cache_data(show_spinner=True)
-def github_tree_paths(ownerrepo: str, branch: str):
-    info = github_branch_info(ownerrepo, branch)
-    tree_sha = info["commit"]["commit"]["tree"]["sha"]
-    url = f"{API_BASE}/repos/{normalize_repo(ownerrepo)}/git/trees/{tree_sha}?recursive=1"
-    r = requests.get(url, headers=_gh_headers(), timeout=180)
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha lendo tree: {r.status_code} {r.text}")
-    tree = r.json().get("tree", [])
-    return [ent["path"] for ent in tree if ent.get("type") == "blob"]
-
 
 def pick_existing_dir(ownerrepo: str, branch: str, candidates: list[str]) -> str:
     """Tenta encontrar diretório existente (case-insensitive / alternativas)."""
@@ -1708,11 +1767,8 @@ def render_ann_tab(
                 markers=True,
                 title=f"{m} por época",
             )
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                key=f"plt_hist_{keybase}_{m}".replace(" ", "_")
-            )
+            _key_safe = re.sub(r"[^A-Za-z0-9_]+", "_", f"plt_hist_{keybase}_{m}")
+            st.plotly_chart(fig, use_container_width=True, key=_key_safe)
     
             # ---------- coleta de resumo ----------
             dir_min = _is_loss_like(m)  # True → minimizar; False → maximizar
@@ -2147,6 +2203,14 @@ with st.sidebar:
     branch_input = st.text_input("branch (vazio = auto)", value="")
     st.header("🗺️ Mapbox (opcional)")
     st.caption("Defina `mapbox.token` em secrets para habilitar satélite.")
+    st.divider()
+    offline = st.toggle("🚫 Executar OFFLINE (pausar chamadas ao GitHub)", value=False,
+                        help="Útil quando atingir rate limit ou no primeiro deploy.")
+    if offline:
+        _gh_set_block(3600)
+    if st.button("🧹 Limpar caches (dados e recursos)"):
+        st.cache_data.clear(); st.cache_resource.clear()
+        st.success("Caches limpos — recarregue a página.")
 
 # Resolve repo/branch FORA da sidebar; se der erro, mostra na área principal (já pintada)
 try:
@@ -3483,6 +3547,7 @@ with tab5:
                                      x="rank_medio_entre_pastas", y=model_col, orientation="h",
                                      title=f"Ranking médio ({m}) — menor é melhor")
                         st.plotly_chart(fig, use_container_width=True)
+
 
 
 
