@@ -2457,9 +2457,16 @@ with tab1:
     # ---------------- Dados por SQ — seleção de fonte/arquivo/ano ----------------
     st.subheader("Dados por `SQ` para espacialização")
     col1, col2, col3 = st.columns([1.6, 1, 1.2], gap="large")
-
+    
     with col1:
-        src_label = st.radio("Origem dos dados", ["originais", "winsorize"], index=0, horizontal=True, key="t1_src")
+        src_label = st.radio(
+            "Origem dos dados",
+            ["originais", "winsorize"],
+            index=0,
+            horizontal=True,
+            key="t1_src",
+        )
+    
         base_dir = pick_existing_dir(
             repo, branch,
             [
@@ -2468,22 +2475,41 @@ with tab1:
                 f"Data/dados/{'originais' if src_label=='originais' else 'winsorize'}",
             ],
         )
-        parquets_all = list_files(repo, base_dir, branch, (".parquet",))
+    
+        # ✅ Agora considera .parquet **e** .csv
+        files_all = list_files(repo, base_dir, branch, (".parquet", ".csv"))
         incl_pred = st.checkbox("Incluir arquivos de predição (pred_*)", value=True, key="t1_incl_pred")
-        parquet_files = [f for f in parquets_all if incl_pred or not f["name"].lower().startswith("pred_")]
-        if not parquet_files:
-            st.warning(f"Nenhum .parquet encontrado em {base_dir}.")
-            t1_ok = False
-        sel_file = st.selectbox("Arquivo .parquet com variáveis", [f["name"] for f in parquet_files], key="t1_varfile")
-        fobj = next(x for x in parquet_files if x["name"] == sel_file)
+        files = [f for f in files_all if incl_pred or not f["name"].lower().startswith("pred_")]
+    
+        if not files:
+            st.warning(f"Nenhum .parquet/.csv encontrado em `{base_dir}`.")
+            st.info("Dicas: verifique o caminho, o modo OFFLINE e/ou coloque um arquivo nessa pasta.")
+            st.stop()
+    
+        names = [f["name"] for f in files]
+        sel_file = st.selectbox("Arquivo de dados (.parquet ou .csv)", names, key="t1_varfile")
+    
+        # ✅ Sem StopIteration
+        files_by_name = {f["name"]: f for f in files}
+        fobj = files_by_name.get(sel_file)
+        if not fobj:
+            st.error("Seleção de arquivo inválida — tente escolher novamente.")
+            st.stop()
+    
         data_file_path = fobj["path"]
-        df_vars = load_parquet(repo, data_file_path, branch)
-
+    
+        # ✅ Carrega conforme a extensão
+        if data_file_path.lower().endswith(".parquet"):
+            df_vars = load_parquet(repo, data_file_path, branch)
+        else:
+            df_vars = load_csv(repo, data_file_path, branch)
+    
     with col2:
         join_col = next((c for c in df_vars.columns if str(c).upper() == "SQ"), None)
         if join_col is None:
             st.error("Dataset selecionado não possui coluna 'SQ'.")
-            t1_ok = False
+            st.stop()
+    
         years_col = next((c for c in df_vars.columns if str(c).lower() in ("ano", "year")), None)
         years = sorted([int(y) for y in df_vars[years_col].dropna().unique()]) if years_col else []
         year = st.select_slider("Ano", options=years, value=years[-1], key="t1_ano") if years else None
@@ -2953,7 +2979,7 @@ with tab2:
                  f"Data/dados/{'winsorize' if ver_val!='originais' else 'originais'}"]
             )
             incl_pred = st.checkbox("Incluir arquivos pred_*", value=False, key="t2_vals_incl_pred")
-            vals_all = list_files(repo, base_vals, branch, (".parquet", ".csv"))
+            vals_all = list_files(ownerrepo, base_vals, branch, (".parquet", ".csv"))
             vals_files = [
                 f for f in vals_all
                 if (incl_pred or not f["name"].lower().startswith("pred_"))
@@ -3676,6 +3702,7 @@ with tab5:
                                      x="rank_medio_entre_pastas", y=model_col, orientation="h",
                                      title=f"Ranking médio ({m}) — menor é melhor")
                         st.plotly_chart(fig, use_container_width=True)
+
 
 
 
