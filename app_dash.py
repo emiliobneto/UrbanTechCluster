@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 import io, os, json, tempfile, re
+from pathlib import Path 
 from typing import Iterable, Sequence, Any, Dict, List, Optional, Tuple
 import requests
 import pandas as pd
@@ -16,18 +17,66 @@ RAW_BASE = "https://raw.githubusercontent.com"
 # FASE 0 — CONFIGURAÇÃO
 # =========================
 
+# Diretórios base (atenção ao D maiúsculo em Data/)
 def _root_dir() -> Path:
-    # Streamlit define __file__, mas deixamos um fallback para segurança.
-    try:
-        return Path(__file__).resolve().parent
-    except NameError:
-        return Path.cwd()
+    # Funciona no Streamlit Cloud e local
+    return Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 
 ROOT = _root_dir()
-DATA = ROOT / "Data"                       # <- D maiúsculo!
+DATA = ROOT / "Data"
 DADOS = DATA / "dados" / "Originais"
 MAPA = DATA / "mapa"
 RECORTES = MAPA / "recortes"
+
+# ==== Helpers ====
+WINSOR_FLAGS = ("winso", "winsor", "winsoriz", "_wins", "wins_")  # ajuste se usar outro padrão
+VALID_EXTS = {".parquet", ".csv"}
+
+def is_winsorized(filename: str) -> bool:
+    name = filename.lower()
+    return any(flag in name for flag in WINSOR_FLAGS)
+
+def listar_dados(base: Path, winsor: bool) -> list[Path]:
+    return sorted(
+        p for p in base.iterdir()
+        if p.is_file() and p.suffix in VALID_EXTS and (is_winsorized(p.name) == winsor)
+    )
+
+@st.cache_data(show_spinner=False)
+def ler_tabela(path: Path) -> pd.DataFrame:
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    if path.suffix == ".csv":
+        # ajuste sep/encoding se necessário
+        return pd.read_csv(path, low_memory=False)
+    raise ValueError(f"Extensão não suportada: {path.suffix}")
+
+def escolher_dado(base: Path):
+    # Botão de seleção (pode trocar por checkbox abaixo, se preferir)
+    versao = st.radio(
+        "Versão dos dados para análise:",
+        ("Originais", "Winsorizados"),
+        horizontal=True,
+        index=0
+    )
+    usar_winsor = (versao == "Winsorizados")
+
+    arquivos = listar_dados(base, winsor=usar_winsor)
+    if not arquivos:
+        st.error("Nenhum arquivo encontrado para a versão selecionada.")
+        st.stop()
+
+    nome_amigavel = [p.name for p in arquivos]
+    escolhido = st.selectbox("Escolha o arquivo:", nome_amigavel, index=0)
+    caminho = base / escolhido
+    df = ler_tabela(caminho)
+    return df, caminho, versao
+
+# ==== Uso no app ====
+st.subheader("Dados de análise")
+df, caminho_escolhido, versao = escolher_dado(DADOS)
+st.caption(f"Versão: {versao} • Arquivo: {caminho_escolhido.name}")
+st.dataframe(df.head(50))
 
 def must_exist(p: Path) -> Path:
     if not p.exists():
@@ -1243,4 +1292,5 @@ with tab4:
 
 with tab5:
     render_tab5(repo or "", branch)
+
 
