@@ -5,7 +5,7 @@ from typing import Iterable, Sequence, Dict, List, Tuple,  Any
 import requests
 import streamlit as st
 import pandas as pd
-import re, ast
+import re, ast, unicodedata
 import numpy as np
 import plotly.express as px
 
@@ -246,6 +246,18 @@ CATEGORICAL = [
     "#10b981", "#22d3ee", "#60a5fa", "#34d399", "#f43f5e",
 ]
 
+# Paleta fixa pedida (cores do mock)
+PALETA_FIXA = {
+    "area_verde_mata": "#419E5F",
+    "rios_corpos_dagua": "#5EA3BD",
+    "cluster_0": "#E1DB8D",
+    "cluster_1": "#E0B451",
+    "cluster_2": "#E1683F",
+    "cluster_3": "#8F3743",
+    "nao_classificados": "#BFBFBF",
+}
+
+
 WINSOR_FLAGS = ("winso", "winsor", "winsoriz", "_wins", "wins_")
 VALID_EXTS = {".parquet", ".csv"}
 
@@ -333,6 +345,66 @@ def classify_numeric(series: pd.Series, k: int = 6):
     out.loc[cats.index] = cats
     return out, bins
 
+def _norm_txt(x: str) -> str:
+    """minúsculas + sem acentos, para reconhecer nomes de colunas."""
+    s = unicodedata.normalize("NFKD", str(x))
+    return "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
+
+def _tidy_metrics_shape(df: pd.DataFrame):
+    """
+    Detecta colunas (cluster, ano, variavel, metrica, valor). Se as métricas vierem em 'wide',
+    transforma para 'long' (metric, value).
+    """
+    cols_norm = {_norm_txt(c): c for c in df.columns}
+
+    cl_col   = next((cols_norm[k] for k in cols_norm if ("estagio" in k or "cluster" in k or k.endswith("label"))), None)
+    year_col = next((cols_norm[k] for k in cols_norm if k in {"ano", "year"}), None)
+    var_col  = next((cols_norm[k] for k in cols_norm if any(t in k for t in ["variavel","variable","feature","indicador","coluna"])), None)
+    met_col  = next((cols_norm[k] for k in cols_norm if any(t in k for t in ["metrica","metric","estatistica","stat"])), None)
+    val_col  = next((cols_norm[k] for k in cols_norm if k in {"valor","value","val"}), None)
+
+    df2 = df.copy()
+
+    # Caso já esteja em "long" (tem metrica + valor)
+    if met_col and val_col:
+        need = [c for c in [cl_col, year_col, var_col, met_col, val_col] if c]
+        return df2[need], {"cluster": cl_col, "year": year_col, "var": var_col, "metric": met_col, "value": val_col}
+
+    # Caso "wide": derrete colunas numéricas (exceto id)
+    id_cols = [c for c in [cl_col, year_col, var_col] if c]
+    metric_cols = [c for c in df2.columns if c not in id_cols and pd.api.types.is_numeric_dtype(df2[c])]
+    if not metric_cols:  # fallback
+        metric_cols = [c for c in df2.columns if c not in id_cols]
+
+    long = df2.melt(id_vars=id_cols, value_vars=metric_cols, var_name="metric", value_name="value")
+    return long, {"cluster": cl_col, "year": year_col, "var": var_col, "metric": "metric", "value": "value"}
+
+def _load_metrics(repo: str, branch: str, winsor: bool):
+    """
+    Lê Parquet (preferido, mais leve). Se não houver, tenta CSV.
+    Bases:
+      - original  -> Data/analises/original/metricas.parquet|csv
+      - winsoriz. -> Data/analises/winsorizados/metricas.parquet|csv
+    """
+    base = "Data/analises/winsorizados" if winsor else "Data/analises/original"
+    # 1) tenta nomes padrão
+    try:
+        return _tidy_metrics_shape(load_parquet(repo, f"{base}/metricas.parquet", branch))
+    except Exception:
+        pass
+    try:
+        return _tidy_metrics_shape(load_csv(repo, f"{base}/metricas.csv", branch))
+    except Exception:
+        pass
+    # 2) procura qualquer arquivo "metrica*"
+    files = list_files(repo, base, branch, (".parquet", ".csv"))
+    cand = [f for f in files if "metrica" in f["name"].lower()]
+    if not cand:
+        raise RuntimeError("Arquivos de métricas não encontrados.")
+    # prefere parquet
+    f = next((x for x in cand if x["name"].lower().endswith(".parquet")), cand[0])
+    df = load_parquet(repo, f["path"], branch) if f["name"].lower().endswith(".parquet") else load_csv(repo, f["path"], branch)
+    return _tidy_metrics_shape(df)
 
 # -------- PCA helpers (reutilizados) --------
 
@@ -466,7 +538,11 @@ def deck_osm(layers, view_state=None):
     if pdk is None:
         st.error("pydeck não instalado (pip install pydeck).")
         return
-    tile = pdk.Layer("TileLayer", data="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+    tile = pdk.Layer(
+        "TileLayer",
+        data="https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
+        opacity=0.5,
+        )
     r = pdk.Deck(
         layers=[tile] + [l for l in layers if l is not None],
         initial_view_state=view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
@@ -661,18 +737,50 @@ def render_tab_clusterizacao(repo: str, branch: str):
 
     # 4) Cores por categoria
     cats = sorted(g[cl_col].dropna().astype(str).unique().tolist())
-    pal = pick_categorical(len(cats))
-    cmap = {cats[i]: pal[i] for i in range(len(cats))}
+    
+    def _color_for_cluster(val: str) -> str:
+        v = str(val).strip()
+        if v.isdigit():
+            return PALETA_FIXA.get(f"cluster_{int(v)}", PALETA_FIXA["nao_classificados"])
+        return PALETA_FIXA["nao_classificados"]
+    
+    cmap = {c: _color_for_cluster(c) for c in cats}
+
 
     gj = make_geojson(g[[cl_col, "geometry"]])
     for feat in gj.get("features", []):
         v = feat.get("properties", {}).get(cl_col, None)
-        hexc = cmap.get(str(v), "#999999")
-        feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+        hexc = cmap.get(str(v), PALETA_FIXA["nao_classificados"])
+        props = feat.setdefault("properties", {})
+        props["fill_color"] = hex_to_rgba(hexc)
+        props["__value__"] = v  # útil no tooltip "Valor: {properties.__value__}"
+
 
     st.caption(f"Fonte clusters: {source}")
     lyr = layer_geojson(gj, name="clusters")
     deck_osm([lyr])
+        # Legenda fixa (mostra sempre; mesmo que nem todas as classes estejam presentes)
+    st.markdown("**Legenda**")
+    leg = [
+        ("Área verde e mata", PALETA_FIXA["area_verde_mata"]),
+        ("Rios e corpos d'água", PALETA_FIXA["rios_corpos_dagua"]),
+        ("Cluster 0", PALETA_FIXA["cluster_0"]),
+        ("Cluster 1", PALETA_FIXA["cluster_1"]),
+        ("Cluster 2", PALETA_FIXA["cluster_2"]),
+        ("Cluster 3", PALETA_FIXA["cluster_3"]),
+        ("Não classificados", PALETA_FIXA["nao_classificados"]),
+    ]
+    cols = st.columns(min(4, len(leg)))
+    for i, (label, color) in enumerate(leg):
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px'>"
+                f"<span style='width:14px;height:14px;background:{color};display:inline-block;border-radius:3px;border:1px solid #00000022'></span>"
+                f"<span>{label}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+        )
+
 
     # 5) Resumo
     st.markdown("### Resumo")
@@ -680,6 +788,66 @@ def render_tab_clusterizacao(repo: str, branch: str):
     st.dataframe(freq, use_container_width=True)
     fig = px.bar(freq[freq["cluster"].notna()], x="cluster", y="n", title="Contagem por cluster")
     st.plotly_chart(fig, use_container_width=True)
+        # ====== Métricas por cluster e ano ======
+    st.markdown("### Métricas por cluster e ano")
+
+    use_wins = st.checkbox("Usar métricas winsorizadas", value=False, key="t2_metrics_wins")
+    try:
+        mdf, meta = _load_metrics(repo, branch, winsor=use_wins)
+    except Exception as e:
+        st.info(f"Não consegui carregar métricas ({'winsorizadas' if use_wins else 'originais'}): {e}")
+        mdf, meta = None, None
+
+    if isinstance(mdf, pd.DataFrame) and meta:
+        clc, yrc, vrc, mtc, vlc = meta["cluster"], meta["year"], meta["var"], meta["metric"], meta["value"]
+
+        # Seletores
+        var_opts = sorted(mdf[vrc].dropna().astype(str).unique().tolist()) if vrc in mdf.columns else []
+        met_opts = sorted(mdf[mtc].dropna().astype(str).unique().tolist()) if mtc in mdf.columns else []
+
+        if vrc in mdf.columns and var_opts:
+            vars_sel = st.multiselect("Variáveis", var_opts, default=var_opts[:1], key="t2_vars_sel")
+        else:
+            vars_sel = []
+
+        if mtc in mdf.columns and met_opts:
+            met_sel = st.selectbox("Métrica", met_opts, index=0, key="t2_metric_sel")
+        else:
+            met_sel = None
+
+        # Filtro
+        dat = mdf.copy()
+        if vars_sel and vrc in dat.columns:
+            dat = dat[dat[vrc].astype(str).isin(vars_sel)]
+        if met_sel is not None and mtc in dat.columns:
+            dat = dat[dat[mtc].astype(str) == str(met_sel)]
+
+        # Tabela cluster × ano (média se houver duplicatas)
+        if isinstance(dat, pd.DataFrame) and not dat.empty and clc in dat.columns:
+            idx = [clc]
+            # se há várias variáveis selecionadas, mantém variável no índice; se apenas uma, esconde para ficar mais compacto
+            if vrc in dat.columns and (not vars_sel or len(vars_sel) != 1):
+                idx.append(vrc)
+
+            if yrc in dat.columns:
+                piv = dat.pivot_table(index=idx, columns=yrc, values=vlc, aggfunc="mean")
+                piv.columns.name = None
+                piv = piv.sort_index().reset_index()
+            else:
+                # sem coluna de ano – mostra apenas por cluster (e variável, se houver)
+                grp = dat.groupby(idx, observed=True)[vlc].mean().reset_index().rename(columns={vlc: "valor"})
+                piv = grp
+
+            # arredonda para ficar legível
+            num_cols = [c for c in piv.columns if c not in idx]
+            piv[num_cols] = piv[num_cols].apply(pd.to_numeric, errors="coerce").round(4)
+
+            st.dataframe(piv, use_container_width=True)
+        else:
+            st.caption("Sem dados de métricas com os filtros atuais.")
+    else:
+        st.caption("Arquivo(s) de métricas não disponíveis.")
+
 
 
 def render_tab_univariadas(repo: str, branch: str):
@@ -1036,6 +1204,14 @@ def render_tab_clusterizador(repo: str, branch: str):
         cats = sorted(g[map_col].dropna().astype(str).unique().tolist())
         pal = pick_categorical(len(cats))
         cmap = {cats[i]: pal[i] for i in range(len(cats))}
+        cats = sorted(g[map_col].dropna().astype(str).unique().tolist())
+        def _color_for_cluster(val: str) -> str:
+            v = str(val).strip()
+            if v.isdigit():
+                return PALETA_FIXA.get(f"cluster_{int(v)}", PALETA_FIXA["nao_classificados"])
+            return PALETA_FIXA["nao_classificados"]
+        cmap = {c: _color_for_cluster(c) for c in cats}
+
 
         gj = make_geojson(g[[map_col, "geometry"]])
         for feat in gj.get("features", []):
@@ -1054,6 +1230,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
