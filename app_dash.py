@@ -452,12 +452,14 @@ def layer_geojson(geojson: Dict[str, Any], name: str = "layer"):
         stroked=True,
         filled=True,
         extruded=False,
-        get_fill_color="d => (d.properties && d.properties.fill_color) ? d.properties.fill_color : [150,150,150,150]",
+        # Sem função JS: usa caminho dentro de properties
+        get_fill_color="properties.fill_color",
         get_line_color=[80, 80, 80, 220],
         get_line_width=1,
         line_width_min_pixels=1,
         auto_highlight=True,
     )
+
 
 
 def deck_osm(layers, view_state=None):
@@ -469,9 +471,10 @@ def deck_osm(layers, view_state=None):
         layers=[tile] + [l for l in layers if l is not None],
         initial_view_state=view_state or pdk.ViewState(latitude=-23.55, longitude=-46.63, zoom=10),
         map_style=None,
-        tooltip={"text": "{name}\n{value}"},
+        tooltip={"text": "Valor: {properties.__value__}"},
     )
     st.pydeck_chart(r, use_container_width=True)
+)
 
 
 def add_lon_lat_from_geometry(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
@@ -1052,6 +1055,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
