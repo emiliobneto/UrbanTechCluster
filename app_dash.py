@@ -246,20 +246,30 @@ CATEGORICAL = [
     "#10b981", "#22d3ee", "#60a5fa", "#34d399", "#f43f5e",
 ]
 
-# Paleta fixa pedida (cores do mock)
-PALETA_FIXA = {
-    "area_verde_mata": "#419E5F",
-    "rios_corpos_dagua": "#5EA3BD",
+# ==== Cores de clusters (valores vêm do arquivo como 0..3) ====
+CLUSTER_COLORS = {
     "0": "#E1DB8D",
     "1": "#E0B451",
     "2": "#E1683F",
     "3": "#8F3743",
-    }
+}
 CLUSTER_COLOR_NA = "#BFBFBF"
 
 WINSOR_FLAGS = ("winso", "winsor", "winsoriz", "_wins", "wins_")
 VALID_EXTS = {".parquet", ".csv"}
 
+def color_for_cluster_code(val: Any) -> str:
+    """Mapeia valor do cluster (0..3 ou string) para a cor padrão."""
+    s = "" if val is None or (isinstance(val, float) and np.isnan(val)) else str(val).strip()
+    # aceitaremos "0", "1", "2", "3" ou inteiros/float exatos
+    if s.isdigit():
+        return CLUSTER_COLORS.get(s, CLUSTER_COLOR_NA)
+    # tenta converter "0.0" etc.
+    try:
+        i = int(float(s))
+        return CLUSTER_COLORS.get(str(i), CLUSTER_COLOR_NA)
+    except Exception:
+        return CLUSTER_COLOR_NA
 
 def is_winsorized(filename: str) -> bool:
     name = filename.lower()
@@ -668,7 +678,7 @@ def render_tab_principal(repo: str, branch: str):
     st.download_button("📥 Baixar CSV (SQ + variável)", csv, file_name=f"dados_{var}.csv", mime="text/csv")
 
 def render_tab_clusterizacao(repo: str, branch: str):
-    st.subheader("🧬 Clusterização — mapa + resumo")
+    st.subheader("🧬 Clusterização — mapa + resumo + métricas")
 
     # 1) Upload ou leitura automática
     colL, colR = st.columns([2, 1])
@@ -734,33 +744,49 @@ def render_tab_clusterizacao(repo: str, branch: str):
 
     g = gdf[["geometry", "_SQ_norm"]].merge(df_est[["_SQ_norm", cl_col]], on="_SQ_norm", how="left")
 
-    # 4) Cores por categoria — do código (0..3) vindo do arquivo EstagioClusterizacao.*
-    cats = sorted(g[cl_col].dropna().astype(str).unique().tolist())
-    
-    def _color_for_code(val) -> str:
-        v = str(val).strip()
-        return CLUSTER_COLORS.get(v, CLUSTER_COLOR_NA)
-    
-    cmap = {c: _color_for_code(c) for c in cats}
-    
+    # 4) Cores pelos códigos (0..3) do arquivo
     gj = make_geojson(g[[cl_col, "geometry"]])
     for feat in gj.get("features", []):
         v = feat.get("properties", {}).get(cl_col, None)
-        hexc = _color_for_code(v)
+        hexc = color_for_cluster_code(v)
         props = feat.setdefault("properties", {})
         props["fill_color"] = hex_to_rgba(hexc)
         props["__value__"] = v  # tooltip
 
+    # Renderiza mapa
+    st.caption(f"Fonte clusters: {source}")
+    lyr = layer_geojson(gj, name="clusters")
+    deck_osm([lyr])
 
-    # 5) Resumo
+    # Legenda (apenas clusters; dados são 0..3)
+    st.markdown("**Legenda**")
+    leg = [
+        ("Cluster 0", CLUSTER_COLORS["0"]),
+        ("Cluster 1", CLUSTER_COLORS["1"]),
+        ("Cluster 2", CLUSTER_COLORS["2"]),
+        ("Cluster 3", CLUSTER_COLORS["3"]),
+        ("Não classificados", CLUSTER_COLOR_NA),
+    ]
+    cols = st.columns(min(4, len(leg)))
+    for i, (label, color) in enumerate(leg):
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px'>"
+                f"<span style='width:14px;height:14px;background:{color};display:inline-block;border-radius:3px;border:1px solid #00000022'></span>"
+                f"<span>{label}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # 5) Resumo (contagem)
     st.markdown("### Resumo")
     freq = g[cl_col].astype("string").value_counts(dropna=False).rename_axis("cluster").reset_index(name="n")
     st.dataframe(freq, use_container_width=True)
     fig = px.bar(freq[freq["cluster"].notna()], x="cluster", y="n", title="Contagem por cluster")
     st.plotly_chart(fig, use_container_width=True)
-        # ====== Métricas por cluster e ano ======
-    st.markdown("### Métricas por cluster e ano")
 
+    # 6) Métricas por cluster e ano (múltiplas métricas)
+    st.markdown("### Métricas por cluster e ano")
     use_wins = st.checkbox("Usar métricas winsorizadas", value=False, key="t2_metrics_wins")
     try:
         mdf, meta = _load_metrics(repo, branch, winsor=use_wins)
@@ -771,7 +797,7 @@ def render_tab_clusterizacao(repo: str, branch: str):
     if isinstance(mdf, pd.DataFrame) and meta:
         clc, yrc, vrc, mtc, vlc = meta["cluster"], meta["year"], meta["var"], meta["metric"], meta["value"]
 
-         # Seletores
+        # Seletores
         var_opts = sorted(mdf[vrc].dropna().astype(str).unique().tolist()) if vrc in mdf.columns else []
         met_opts = sorted(mdf[mtc].dropna().astype(str).unique().tolist()) if mtc in mdf.columns else []
 
@@ -780,7 +806,6 @@ def render_tab_clusterizacao(repo: str, branch: str):
         else:
             vars_sel = []
 
-        # <<<<<< AQUI vira multiselect de Métricas >>>>>>
         if mtc in mdf.columns and met_opts:
             mets_sel = st.multiselect("Métricas", met_opts, default=met_opts[:1], key="t2_metric_sel_multi")
         else:
@@ -796,7 +821,6 @@ def render_tab_clusterizacao(repo: str, branch: str):
         # Tabela cluster × (métrica, ano) – média se houver duplicatas
         if isinstance(dat, pd.DataFrame) and not dat.empty and clc in dat.columns:
             idx = [clc]
-            # se há várias variáveis selecionadas, mantém variável no índice; se apenas uma, esconde para ficar compacto
             if vrc in dat.columns and (not vars_sel or len(vars_sel) != 1):
                 idx.append(vrc)
 
@@ -809,22 +833,19 @@ def render_tab_clusterizacao(repo: str, branch: str):
             else:
                 piv = dat.groupby(idx, observed=True)[vlc].mean().to_frame("valor")
 
-            # Flatten de colunas (métrica__ano)
+            # Flatten colunas (métrica__ano)
             if isinstance(piv.columns, pd.MultiIndex):
                 piv.columns = [f"{str(m)}__{str(a)}" for (m, a) in piv.columns]
             else:
                 piv.columns = [str(c) for c in piv.columns]
 
             piv = piv.sort_index().reset_index()
-
-            # arredonda para ficar legível
             num_cols = [c for c in piv.columns if c not in idx]
             piv[num_cols] = piv[num_cols].apply(pd.to_numeric, errors="coerce").round(4)
 
             st.dataframe(piv, use_container_width=True)
         else:
             st.caption("Sem dados de métricas com os filtros atuais.")
-
     else:
         st.caption("Arquivo(s) de métricas não disponíveis.")
 
@@ -1184,20 +1205,22 @@ def render_tab_clusterizador(repo: str, branch: str):
         cats = sorted(g[map_col].dropna().astype(str).unique().tolist())
         pal = pick_categorical(len(cats))
         cmap = {cats[i]: pal[i] for i in range(len(cats))}
+                # Paleta: se os valores são 0..3, usa CLUSTER_COLORS; senão, categórica padrão
         cats = sorted(g[map_col].dropna().astype(str).unique().tolist())
-        def _color_for_cluster(val: str) -> str:
-            v = str(val).strip()
-            if v.isdigit():
-                return PALETA_FIXA.get(f"cluster_{int(v)}", PALETA_FIXA["nao_classificados"])
-            return PALETA_FIXA["nao_classificados"]
-        cmap = {c: _color_for_cluster(c) for c in cats}
-
+        only_digits = all(re.fullmatch(r"\s*\d+(\.0+)?\s*", c) for c in cats)
+        if only_digits and set(int(float(c)) for c in cats).issubset({0,1,2,3}):
+            def _c(v): return color_for_cluster_code(v)
+            cmap = {c: _c(c) for c in cats}
+        else:
+            pal = pick_categorical(len(cats))
+            cmap = {cats[i]: pal[i] for i in range(len(cats))}
 
         gj = make_geojson(g[[map_col, "geometry"]])
         for feat in gj.get("features", []):
             v = feat.get("properties", {}).get(map_col, None)
-            hexc = cmap.get(str(v), "#999999")
+            hexc = cmap.get(str(v), CLUSTER_COLOR_NA)
             feat.setdefault("properties", {})["fill_color"] = hex_to_rgba(hexc)
+
         lyr = layer_geojson(gj, name=map_col)
         deck_osm([lyr])
 
@@ -1210,6 +1233,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
