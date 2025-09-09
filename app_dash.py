@@ -645,27 +645,7 @@ def render_tab_principal(repo: str, branch: str):
 
     lyr = layer_geojson(gj, name="quadras")
     deck_osm([lyr])
-    # Legenda (apenas clusters; valores no arquivo são 0..3)
-    st.markdown("**Legenda**")
-    leg = [
-        ("Cluster 0", CLUSTER_COLORS["0"]),
-        ("Cluster 1", CLUSTER_COLORS["1"]),
-        ("Cluster 2", CLUSTER_COLORS["2"]),
-        ("Cluster 3", CLUSTER_COLORS["3"]),
-        ("Não classificados", CLUSTER_COLOR_NA),
-    ]
-    cols = st.columns(min(4, len(leg)))
-    for i, (label, color) in enumerate(leg):
-        with cols[i % len(cols)]:
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px'>"
-                f"<span style='width:14px;height:14px;background:{color};display:inline-block;border-radius:3px;border:1px solid #00000022'></span>"
-                f"<span>{label}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-
+    
     # 5) Legenda + Tabela e download
     st.markdown("**Legenda**")
     if not legend:
@@ -1230,6 +1210,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
