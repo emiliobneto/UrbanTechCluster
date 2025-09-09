@@ -27,16 +27,21 @@ def main():
             st.cache_data.clear(); st.cache_resource.clear()
             st.success("Caches limpos — recarregue a página.")
 
-    repo = repo_in.strip()
-    branch = resolve_branch(repo, branch_in.strip()) if repo else "main"
-
-    if repo:
+    repo_raw = repo_in.strip()
+    branch_in = branch_in.strip()
+    
+    repo = ""
+    if repo_raw:
         try:
-            repo = normalize_repo(repo)
-            st.caption(f"Usando: **{repo}@{branch}** (prioriza arquivos locais; GitHub é fallback).")
+            repo = normalize_repo(repo_raw)
         except Exception as e:
             st.error(f"Repo inválido: {e}")
             repo = ""
+    
+    branch = resolve_branch(repo, branch_in) if repo else "main"
+    if repo:
+        st.caption(f"Usando: **{repo}@{branch}** (prioriza arquivos locais; GitHub é fallback).")
+
 
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -53,10 +58,6 @@ def main():
         render_tab_pca(repo or "", branch)
     with tab5:
         render_tab_clusterizador(repo or "", branch)
-
-
-if __name__ == "__main__":
-    main()
 
 # geopandas é opcional — só exigimos ao ler GPKG
 try:
@@ -1051,4 +1052,9 @@ def render_tab_clusterizador(repo: str, branch: str):
         st.dataframe(freq, use_container_width=True)
     else:
         st.info("Arquivos de predição com meta não encontrados nesta execução.")
+
+# --- entrypoint ---
+if __name__ == "__main__":
+    main()
+
 
