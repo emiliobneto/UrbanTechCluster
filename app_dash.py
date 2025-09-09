@@ -449,7 +449,7 @@ def layer_geojson(geojson: Dict[str, Any], name: str = "layer"):
     return pdk.Layer(
         "GeoJsonLayer",
         data=geojson,
-        id=f"geojson-{re.sub(r'[^A-Za-z0-9_\-]+', '-', str(name)).strip('-') or 'layer'}",
+        id=f"geojson-{re.sub(r'[^A-Za-z0-9_-]+', '-', str(name)).strip('-') or 'layer'}",
         pickable=True,
         stroked=True,
         filled=True,
@@ -1051,3 +1051,4 @@ def render_tab_clusterizador(repo: str, branch: str):
         st.dataframe(freq, use_container_width=True)
     else:
         st.info("Arquivos de predição com meta não encontrados nesta execução.")
+
