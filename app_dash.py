@@ -422,9 +422,6 @@ try:
 except Exception:
     pdk = None
 
-from data_utils import hex_to_rgba
-
-
 def ensure_wgs84(gdf_in):
     try:
         if hasattr(gdf_in, "crs") and gdf_in.crs and str(gdf_in.crs).lower() not in ("epsg:4326", "wgs84"):
@@ -662,7 +659,6 @@ def render_tab_clusterizacao(repo: str, branch: str):
 
     # 4) Cores por categoria
     cats = sorted(g[cl_col].dropna().astype(str).unique().tolist())
-    from data_utils import pick_categorical
     pal = pick_categorical(len(cats))
     cmap = {cats[i]: pal[i] for i in range(len(cats))}
 
@@ -1056,5 +1052,6 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
