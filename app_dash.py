@@ -474,7 +474,6 @@ def deck_osm(layers, view_state=None):
         tooltip={"text": "Valor: {properties.__value__}"},
     )
     st.pydeck_chart(r, use_container_width=True)
-)
 
 
 def add_lon_lat_from_geometry(gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
@@ -1055,6 +1054,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
