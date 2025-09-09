@@ -250,13 +250,12 @@ CATEGORICAL = [
 PALETA_FIXA = {
     "area_verde_mata": "#419E5F",
     "rios_corpos_dagua": "#5EA3BD",
-    "cluster_0": "#E1DB8D",
-    "cluster_1": "#E0B451",
-    "cluster_2": "#E1683F",
-    "cluster_3": "#8F3743",
-    "nao_classificados": "#BFBFBF",
-}
-
+    "0": "#E1DB8D",
+    "1": "#E0B451",
+    "2": "#E1683F",
+    "3": "#8F3743",
+    }
+CLUSTER_COLOR_NA = "#BFBFBF"
 
 WINSOR_FLAGS = ("winso", "winsor", "winsoriz", "_wins", "wins_")
 VALID_EXTS = {".parquet", ".csv"}
@@ -646,6 +645,26 @@ def render_tab_principal(repo: str, branch: str):
 
     lyr = layer_geojson(gj, name="quadras")
     deck_osm([lyr])
+    # Legenda (apenas clusters; valores no arquivo são 0..3)
+    st.markdown("**Legenda**")
+    leg = [
+        ("Cluster 0", CLUSTER_COLORS["0"]),
+        ("Cluster 1", CLUSTER_COLORS["1"]),
+        ("Cluster 2", CLUSTER_COLORS["2"]),
+        ("Cluster 3", CLUSTER_COLORS["3"]),
+        ("Não classificados", CLUSTER_COLOR_NA),
+    ]
+    cols = st.columns(min(4, len(leg)))
+    for i, (label, color) in enumerate(leg):
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px'>"
+                f"<span style='width:14px;height:14px;background:{color};display:inline-block;border-radius:3px;border:1px solid #00000022'></span>"
+                f"<span>{label}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
 
     # 5) Legenda + Tabela e download
     st.markdown("**Legenda**")
@@ -735,51 +754,22 @@ def render_tab_clusterizacao(repo: str, branch: str):
 
     g = gdf[["geometry", "_SQ_norm"]].merge(df_est[["_SQ_norm", cl_col]], on="_SQ_norm", how="left")
 
-    # 4) Cores por categoria
+    # 4) Cores por categoria — do código (0..3) vindo do arquivo EstagioClusterizacao.*
     cats = sorted(g[cl_col].dropna().astype(str).unique().tolist())
     
-    def _color_for_cluster(val: str) -> str:
+    def _color_for_code(val) -> str:
         v = str(val).strip()
-        if v.isdigit():
-            return PALETA_FIXA.get(f"cluster_{int(v)}", PALETA_FIXA["nao_classificados"])
-        return PALETA_FIXA["nao_classificados"]
+        return CLUSTER_COLORS.get(v, CLUSTER_COLOR_NA)
     
-    cmap = {c: _color_for_cluster(c) for c in cats}
-
-
+    cmap = {c: _color_for_code(c) for c in cats}
+    
     gj = make_geojson(g[[cl_col, "geometry"]])
     for feat in gj.get("features", []):
         v = feat.get("properties", {}).get(cl_col, None)
-        hexc = cmap.get(str(v), PALETA_FIXA["nao_classificados"])
+        hexc = _color_for_code(v)
         props = feat.setdefault("properties", {})
         props["fill_color"] = hex_to_rgba(hexc)
-        props["__value__"] = v  # útil no tooltip "Valor: {properties.__value__}"
-
-
-    st.caption(f"Fonte clusters: {source}")
-    lyr = layer_geojson(gj, name="clusters")
-    deck_osm([lyr])
-        # Legenda fixa (mostra sempre; mesmo que nem todas as classes estejam presentes)
-    st.markdown("**Legenda**")
-    leg = [
-        ("Área verde e mata", PALETA_FIXA["area_verde_mata"]),
-        ("Rios e corpos d'água", PALETA_FIXA["rios_corpos_dagua"]),
-        ("Cluster 0", PALETA_FIXA["cluster_0"]),
-        ("Cluster 1", PALETA_FIXA["cluster_1"]),
-        ("Cluster 2", PALETA_FIXA["cluster_2"]),
-        ("Cluster 3", PALETA_FIXA["cluster_3"]),
-        ("Não classificados", PALETA_FIXA["nao_classificados"]),
-    ]
-    cols = st.columns(min(4, len(leg)))
-    for i, (label, color) in enumerate(leg):
-        with cols[i % len(cols)]:
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px'>"
-                f"<span style='width:14px;height:14px;background:{color};display:inline-block;border-radius:3px;border:1px solid #00000022'></span>"
-                f"<span>{label}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-        )
+        props["__value__"] = v  # tooltip
 
 
     # 5) Resumo
@@ -801,7 +791,7 @@ def render_tab_clusterizacao(repo: str, branch: str):
     if isinstance(mdf, pd.DataFrame) and meta:
         clc, yrc, vrc, mtc, vlc = meta["cluster"], meta["year"], meta["var"], meta["metric"], meta["value"]
 
-        # Seletores
+         # Seletores
         var_opts = sorted(mdf[vrc].dropna().astype(str).unique().tolist()) if vrc in mdf.columns else []
         met_opts = sorted(mdf[mtc].dropna().astype(str).unique().tolist()) if mtc in mdf.columns else []
 
@@ -810,33 +800,42 @@ def render_tab_clusterizacao(repo: str, branch: str):
         else:
             vars_sel = []
 
+        # <<<<<< AQUI vira multiselect de Métricas >>>>>>
         if mtc in mdf.columns and met_opts:
-            met_sel = st.selectbox("Métrica", met_opts, index=0, key="t2_metric_sel")
+            mets_sel = st.multiselect("Métricas", met_opts, default=met_opts[:1], key="t2_metric_sel_multi")
         else:
-            met_sel = None
+            mets_sel = []
 
         # Filtro
         dat = mdf.copy()
         if vars_sel and vrc in dat.columns:
             dat = dat[dat[vrc].astype(str).isin(vars_sel)]
-        if met_sel is not None and mtc in dat.columns:
-            dat = dat[dat[mtc].astype(str) == str(met_sel)]
+        if mets_sel and mtc in dat.columns:
+            dat = dat[dat[mtc].astype(str).isin([str(m) for m in mets_sel])]
 
-        # Tabela cluster × ano (média se houver duplicatas)
+        # Tabela cluster × (métrica, ano) – média se houver duplicatas
         if isinstance(dat, pd.DataFrame) and not dat.empty and clc in dat.columns:
             idx = [clc]
-            # se há várias variáveis selecionadas, mantém variável no índice; se apenas uma, esconde para ficar mais compacto
+            # se há várias variáveis selecionadas, mantém variável no índice; se apenas uma, esconde para ficar compacto
             if vrc in dat.columns and (not vars_sel or len(vars_sel) != 1):
                 idx.append(vrc)
 
-            if yrc in dat.columns:
+            if yrc in dat.columns and mtc in dat.columns:
+                piv = dat.pivot_table(index=idx, columns=[mtc, yrc], values=vlc, aggfunc="mean")
+            elif mtc in dat.columns:
+                piv = dat.pivot_table(index=idx, columns=mtc, values=vlc, aggfunc="mean")
+            elif yrc in dat.columns:
                 piv = dat.pivot_table(index=idx, columns=yrc, values=vlc, aggfunc="mean")
-                piv.columns.name = None
-                piv = piv.sort_index().reset_index()
             else:
-                # sem coluna de ano – mostra apenas por cluster (e variável, se houver)
-                grp = dat.groupby(idx, observed=True)[vlc].mean().reset_index().rename(columns={vlc: "valor"})
-                piv = grp
+                piv = dat.groupby(idx, observed=True)[vlc].mean().to_frame("valor")
+
+            # Flatten de colunas (métrica__ano)
+            if isinstance(piv.columns, pd.MultiIndex):
+                piv.columns = [f"{str(m)}__{str(a)}" for (m, a) in piv.columns]
+            else:
+                piv.columns = [str(c) for c in piv.columns]
+
+            piv = piv.sort_index().reset_index()
 
             # arredonda para ficar legível
             num_cols = [c for c in piv.columns if c not in idx]
@@ -845,6 +844,7 @@ def render_tab_clusterizacao(repo: str, branch: str):
             st.dataframe(piv, use_container_width=True)
         else:
             st.caption("Sem dados de métricas com os filtros atuais.")
+
     else:
         st.caption("Arquivo(s) de métricas não disponíveis.")
 
@@ -1230,6 +1230,7 @@ def render_tab_clusterizador(repo: str, branch: str):
 # --- entrypoint ---
 if __name__ == "__main__":
     main()
+
 
 
 
